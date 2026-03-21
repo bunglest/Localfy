@@ -1,0 +1,796 @@
+const { app, BrowserWindow, ipcMain, shell, dialog, protocol } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
+
+const isDev = process.env.NODE_ENV === 'development';
+
+// ─── Single-instance lock + deep-link handler ─────────────────────────────────
+// Must happen BEFORE app.whenReady so the second-instance event fires early.
+
+const gotSingleLock = app.requestSingleInstanceLock();
+
+if (!gotSingleLock) {
+  // A second instance was launched — just quit; the first instance handles it
+  app.quit();
+}
+
+// When Windows activates the app via localfy:// URI, a second Electron process
+// is spawned. requestSingleInstanceLock makes it quit and fire this event in
+// the FIRST instance, passing the command-line args (which contain the URL).
+app.on('second-instance', (_event, argv) => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+  const deepLink = argv.find(a => a.startsWith('localfy://'));
+  if (deepLink) handleDeepLink(deepLink);
+});
+
+// macOS: protocol link opens app directly
+app.on('open-url', (event, deepLink) => {
+  event.preventDefault();
+  handleDeepLink(deepLink);
+});
+
+// ─── Register custom protocol (localfy://) ────────────────────────────────────
+// In dev mode we point to the electron binary + main.js path so it works
+// even before the app is packaged.
+
+function registerProtocol() {
+  if (isDev) {
+    // electron.exe -- /path/to/main.js %1
+    app.setAsDefaultProtocolClient('localfy', process.execPath, [
+      '--',
+      path.resolve(process.argv[1]),
+    ]);
+  } else {
+    app.setAsDefaultProtocolClient('localfy');
+  }
+}
+
+// ─── Window ──────────────────────────────────────────────────────────────────
+
+let mainWindow;
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: '#07080D',
+    frame: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: false,        // allows file:// URLs in renderer
+      allowRunningInsecureContent: false,
+    },
+  });
+
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173');
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+  }
+
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+app.whenReady().then(() => {
+  registerProtocol();
+  createWindow();
+});
+
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (!mainWindow) createWindow(); });
+
+// ─── Settings helpers ─────────────────────────────────────────────────────────
+
+function getSetting(key, def) {
+  return require('./db').getSetting(key, def);
+}
+function setSetting(key, value) {
+  return require('./db').setSetting(key, value);
+}
+
+// ─── Spotify OAuth (PKCE + custom URI scheme) ─────────────────────────────────
+
+const SPOTIFY_REDIRECT_URI = 'localfy://callback';
+const SPOTIFY_SCOPES = [
+  'user-read-private', 'user-read-email', 'user-library-read',
+  'playlist-read-private', 'playlist-read-collaborative',
+  'user-top-read', 'user-read-recently-played',
+].join(' ');
+
+let pendingOAuth = null; // { resolve, reject, state, verifier, clientId }
+
+function handleDeepLink(deepLinkUrl) {
+  // deepLinkUrl looks like: localfy://callback?code=...&state=...
+  if (!deepLinkUrl.startsWith('localfy://callback')) return;
+
+  // Parse as a normal URL by swapping scheme
+  let parsed;
+  try {
+    parsed = new URL(deepLinkUrl.replace('localfy://callback', 'https://localfy.app/callback'));
+  } catch {
+    return;
+  }
+
+  const code  = parsed.searchParams.get('code');
+  const state = parsed.searchParams.get('state');
+  const error = parsed.searchParams.get('error');
+
+  if (!pendingOAuth) return;
+  const { resolve, reject, state: expectedState, verifier, clientId } = pendingOAuth;
+  pendingOAuth = null;
+
+  if (error) {
+    reject(new Error(`Spotify auth error: ${error}`));
+    return;
+  }
+
+  if (state !== expectedState) {
+    reject(new Error('OAuth state mismatch — possible CSRF attack'));
+    return;
+  }
+
+  // Exchange code for tokens
+  exchangeCode(code, clientId, verifier)
+    .then(tokens => {
+      setSetting('spotify.tokens', JSON.stringify(tokens));
+      resolve({ success: true, tokens });
+    })
+    .catch(err => reject(err));
+}
+
+function generateCodeVerifier() {
+  return crypto.randomBytes(64).toString('base64url');
+}
+function generateCodeChallenge(verifier) {
+  return crypto.createHash('sha256').update(verifier).digest('base64url');
+}
+
+ipcMain.handle('spotify:login', async (_, clientId) => {
+  return new Promise((resolve, reject) => {
+    const verifier  = generateCodeVerifier();
+    const challenge = generateCodeChallenge(verifier);
+    const state     = crypto.randomBytes(16).toString('hex');
+
+    setSetting('spotify.clientId', clientId);
+
+    pendingOAuth = { resolve, reject, state, verifier, clientId };
+
+    const params = new URLSearchParams({
+      response_type:         'code',
+      client_id:             clientId,
+      scope:                 SPOTIFY_SCOPES,
+      redirect_uri:          SPOTIFY_REDIRECT_URI,
+      code_challenge_method: 'S256',
+      code_challenge:        challenge,
+      state,
+    });
+
+    shell.openExternal(`https://accounts.spotify.com/authorize?${params}`);
+
+    // Timeout after 5 minutes
+    setTimeout(() => {
+      if (pendingOAuth) {
+        pendingOAuth = null;
+        reject(new Error('Login timed out. Please try again.'));
+      }
+    }, 300_000);
+  });
+});
+
+async function exchangeCode(code, clientId, verifier) {
+  const body = new URLSearchParams({
+    grant_type:    'authorization_code',
+    code,
+    redirect_uri:  SPOTIFY_REDIRECT_URI,
+    client_id:     clientId,
+    code_verifier: verifier,
+  });
+
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Token exchange failed (${res.status}): ${txt}`);
+  }
+  const data = await res.json();
+  data.expires_at = Date.now() + data.expires_in * 1000;
+  return data;
+}
+
+ipcMain.handle('spotify:logout', () => {
+  setSetting('spotify.tokens', '');
+  setSetting('spotify.clientId', '');
+});
+
+ipcMain.handle('spotify:getTokens', () => {
+  const raw = getSetting('spotify.tokens', '');
+  try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+});
+
+ipcMain.handle('spotify:refreshToken', async () => {
+  const raw      = getSetting('spotify.tokens', '');
+  const tokens   = raw ? JSON.parse(raw) : null;
+  const clientId = getSetting('spotify.clientId', '');
+  if (!tokens || !clientId) throw new Error('Not logged in');
+
+  const body = new URLSearchParams({
+    grant_type:    'refresh_token',
+    refresh_token: tokens.refresh_token,
+    client_id:     clientId,
+  });
+
+  const res  = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  const data = await res.json();
+  data.expires_at = Date.now() + data.expires_in * 1000;
+  if (!data.refresh_token) data.refresh_token = tokens.refresh_token;
+  setSetting('spotify.tokens', JSON.stringify(data));
+  return data;
+});
+
+// ─── Spotify API Helper ───────────────────────────────────────────────────────
+
+async function spotifyFetch(endpoint, options = {}) {
+  const raw = getSetting('spotify.tokens', '');
+  let tokens = raw ? JSON.parse(raw) : null;
+  if (!tokens) throw new Error('Not authenticated');
+
+  if (Date.now() > (tokens.expires_at || 0) - 60_000) {
+    const clientId = getSetting('spotify.clientId', '');
+    const body = new URLSearchParams({
+      grant_type:    'refresh_token',
+      refresh_token: tokens.refresh_token,
+      client_id:     clientId,
+    });
+    const r = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    tokens = await r.json();
+    tokens.expires_at = Date.now() + tokens.expires_in * 1000;
+    if (!tokens.refresh_token) {
+      const prev = JSON.parse(getSetting('spotify.tokens', '{}'));
+      tokens.refresh_token = prev.refresh_token;
+    }
+    setSetting('spotify.tokens', JSON.stringify(tokens));
+  }
+
+  const res = await fetch(`https://api.spotify.com/v1${endpoint}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${tokens.access_token}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Spotify ${endpoint}: ${res.status} — ${err}`);
+  }
+  return res.json();
+}
+
+// ─── Spotify Data Handlers ────────────────────────────────────────────────────
+
+ipcMain.handle('spotify:getMe', () => spotifyFetch('/me'));
+
+ipcMain.handle('spotify:getRecommendations', async () => {
+  // /recommendations is deprecated for new apps — fall back to top tracks
+  try {
+    const top = await spotifyFetch('/me/top/tracks?limit=20&time_range=medium_term');
+    if (top.items?.length) return { tracks: top.items };
+    // If no medium-term data, try short-term
+    const short = await spotifyFetch('/me/top/tracks?limit=20&time_range=short_term');
+    return { tracks: short.items || [] };
+  } catch { return { tracks: [] }; }
+});
+
+ipcMain.handle('spotify:getRecentlyPlayed', async () => {
+  try {
+    const data = await spotifyFetch('/me/player/recently-played?limit=20');
+    // De-duplicate by track id
+    const seen = new Set();
+    const tracks = (data.items || [])
+      .map(i => i.track)
+      .filter(t => { if (!t || seen.has(t.id)) return false; seen.add(t.id); return true; });
+    return { tracks };
+  } catch { return { tracks: [] }; }
+});
+
+ipcMain.handle('spotify:getLikedSongs', async (_, offset = 0) =>
+  spotifyFetch(`/me/tracks?limit=50&offset=${offset}`)
+);
+
+ipcMain.handle('spotify:getPlaylists', async () => {
+  const all = [];
+  let endpoint = '/me/playlists?limit=50';
+  while (endpoint) {
+    const data = await spotifyFetch(endpoint);
+    all.push(...(data.items || []));
+    endpoint = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
+  }
+  return all;
+});
+
+ipcMain.handle('spotify:getPlaylist', (_, id) =>
+  spotifyFetch(`/playlists/${id}/tracks?limit=100`)
+);
+
+ipcMain.handle('spotify:search', (_, q) =>
+  spotifyFetch(`/search?q=${encodeURIComponent(q)}&type=track,album,artist,playlist&limit=20`)
+);
+
+// /browse/featured-playlists was removed from Spotify API in 2024 — use user's own playlists instead
+ipcMain.handle('spotify:getFeatured', async () => {
+  try {
+    const data = await spotifyFetch('/me/playlists?limit=8');
+    // Return in the same shape the Home page expects: { playlists: { items: [...] } }
+    return { playlists: { items: data.items || [] } };
+  } catch (e) {
+    return { playlists: { items: [] } };
+  }
+});
+ipcMain.handle('spotify:getNewReleases', () => spotifyFetch('/browse/new-releases?limit=10'));
+ipcMain.handle('spotify:getCategories',  () => spotifyFetch('/browse/categories?limit=20'));
+
+ipcMain.handle('spotify:getArtist', (_, id) => spotifyFetch(`/artists/${id}`));
+ipcMain.handle('spotify:getArtistTopTracks', (_, id) =>
+  spotifyFetch(`/artists/${id}/top-tracks?market=from_token`)
+);
+ipcMain.handle('spotify:getArtistAlbums', (_, id) =>
+  spotifyFetch(`/artists/${id}/albums?include_groups=album,single&market=from_token&limit=20`)
+);
+ipcMain.handle('spotify:getAlbumTracks', (_, id) =>
+  spotifyFetch(`/albums/${id}/tracks?limit=50`)
+);
+// /artists/{id}/related-artists was removed from Spotify API in 2024 — return empty gracefully
+ipcMain.handle('spotify:getRelatedArtists', async (_, id) => {
+  try {
+    return await spotifyFetch(`/artists/${id}/related-artists`);
+  } catch (e) {
+    return { artists: [] };
+  }
+});
+
+ipcMain.handle('spotify:getTopArtists', (_, range = 'medium_term') =>
+  spotifyFetch(`/me/top/artists?limit=10&time_range=${range}`)
+);
+ipcMain.handle('spotify:getDiscoverTracks', async () => {
+  try {
+    const [topTracks, topArtists] = await Promise.all([
+      spotifyFetch('/me/top/tracks?limit=5&time_range=short_term'),
+      spotifyFetch('/me/top/artists?limit=5&time_range=short_term'),
+    ]);
+    const seedTracks = (topTracks?.items || []).slice(0, 3).map(t => t.id);
+    const seedArtists = (topArtists?.items || []).slice(0, 2).map(a => a.id);
+    const params = new URLSearchParams({ limit: '50' });
+    if (seedTracks.length) params.set('seed_tracks', seedTracks.join(','));
+    if (seedArtists.length) params.set('seed_artists', seedArtists.join(','));
+    const recs = await spotifyFetch(`/recommendations?${params}`);
+    // Filter out tracks already in local DB
+    const known = new Set(db.getAllSpotifyIds());
+    const fresh = (recs?.tracks || []).filter(t => !known.has(t.id));
+    return { tracks: fresh, seeds: { artists: topArtists?.items?.slice(0, 5) || [], tracks: topTracks?.items?.slice(0, 5) || [] } };
+  } catch (e) {
+    return { tracks: [], seeds: { artists: [], tracks: [] }, error: e.message };
+  }
+});
+
+// ─── DB Handlers ─────────────────────────────────────────────────────────────
+
+const db = require('./db');
+
+ipcMain.handle('db:getDownloaded',      ()       => db.getAllDownloadedTracks());
+ipcMain.handle('db:getLiked',           ()       => db.getAllLikedTracks());
+ipcMain.handle('db:getPlaylists',       ()       => db.getAllPlaylists());
+ipcMain.handle('db:getPlaylistTracks',  (_, id)  => db.getPlaylistTracks(id));
+ipcMain.handle('db:getFolders',         ()       => db.getAllFolders());
+ipcMain.handle('db:searchTracks',       (_, q)   => db.searchTracks(q));
+ipcMain.handle('db:createPlaylist',     (_, n, f) => db.createLocalPlaylist(n, f));
+ipcMain.handle('db:deletePlaylist',     (_, id)  => db.deletePlaylist(id));
+ipcMain.handle('db:createFolder',       (_, n)   => db.createFolder(n));
+ipcMain.handle('db:deleteFolder',       (_, id)  => db.deleteFolder(id));
+ipcMain.handle('db:movePlaylist',       (_, p,f) => db.movePlaylistToFolder(p, f));
+ipcMain.handle('db:incrementPlay',      (_, id)  => db.incrementPlayCount(id));
+ipcMain.handle('db:deleteAllDownloads', ()       => db.deleteAllDownloads());
+
+ipcMain.handle('db:toggleLike', (_, track) => {
+  const existing = db.getTrackBySpotifyId(track.spotify_id);
+  if (existing) {
+    const nowLiked = !existing.liked;
+    db.updateTrackLiked(existing.id, nowLiked);
+    return nowLiked;
+  }
+  db.upsertTrack({ ...track, id: crypto.randomUUID(), liked: 1 });
+  return true;
+});
+
+ipcMain.handle('db:recordPlay',          (_, trackId, durationMs) => db.recordPlay(trackId, durationMs));
+ipcMain.handle('db:getStatsData',        () => db.getStatsData());
+ipcMain.handle('db:getAllSpotifyIds',    () => db.getAllSpotifyIds());
+ipcMain.handle('db:updatePlaylistImage', (_, playlistId, imagePath) => db.updatePlaylistImage(playlistId, imagePath));
+ipcMain.handle('db:renamePlaylist',      (_, id, name) => db.renamePlaylist(id, name));
+ipcMain.handle('db:renameFolder',        (_, id, name) => db.renameFolder(id, name));
+
+ipcMain.handle('settings:chooseImage', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose Playlist Image',
+    filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const fp = result.filePaths[0].replace(/\\/g, '/');
+  return fp.startsWith('/') ? `file://${fp}` : `file:///${fp}`;
+});
+
+// ─── Import ───────────────────────────────────────────────────────────────────
+
+ipcMain.handle('import:likedSongs', async () => {
+  let offset = 0, total = 0, imported = 0;
+  try {
+    do {
+      const data = await spotifyFetch(`/me/tracks?limit=50&offset=${offset}`);
+      total = data.total || 0;
+      for (const item of (data.items || [])) {
+        const t = item.track;
+        if (!t) continue;
+        db.upsertTrack({
+          id: crypto.randomUUID(), spotify_id: t.id,
+          title: t.name, artist: t.artists?.map(a => a.name).join(', ') || '',
+          album: t.album?.name || '', album_art: t.album?.images?.[0]?.url || '',
+          duration_ms: t.duration_ms, liked: 1,
+        });
+        imported++;
+      }
+      mainWindow?.webContents.send('import:progress', { imported, total, type: 'liked' });
+      offset += 50;
+    } while (offset < total);
+    return { success: true, imported, total };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('import:playlists', async () => {
+  try {
+    const playlists = await spotifyFetch('/me/playlists?limit=50');
+    const items = playlists.items || [];
+    let imported = 0;
+    for (const pl of items) {
+      db.upsertPlaylist({
+        id: pl.id, spotify_id: pl.id, name: pl.name,
+        description: pl.description || '', image_url: pl.images?.[0]?.url || '',
+        owner: pl.owner?.display_name || '', folder_id: null,
+      });
+      let endpoint = `/playlists/${pl.id}/tracks?limit=100`;
+      let pos = 0;
+      while (endpoint) {
+        const td = await spotifyFetch(endpoint);
+        for (const item of (td.items || [])) {
+          const t = item.track;
+          if (!t || t.is_local) continue;
+          const saved = db.upsertTrack({
+            id: crypto.randomUUID(), spotify_id: t.id, title: t.name,
+            artist: t.artists?.map(a => a.name).join(', ') || '',
+            album: t.album?.name || '', album_art: t.album?.images?.[0]?.url || '',
+            duration_ms: t.duration_ms, liked: 0,
+          });
+          db.addTrackToPlaylist(pl.id, saved.id, pos++);
+        }
+        endpoint = td.next ? td.next.replace('https://api.spotify.com/v1', '') : null;
+      }
+      imported++;
+      mainWindow?.webContents.send('import:progress', { imported, total: items.length, type: 'playlists' });
+    }
+    return { success: true, imported };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+// ─── Downloads ────────────────────────────────────────────────────────────────
+
+let downloadQueue  = [];
+let isDownloading  = false;
+
+function getDownloadPath() {
+  const custom = getSetting('downloadPath', '');
+  if (custom && fs.existsSync(custom)) return custom;
+  const dir = path.join(app.getPath('music'), 'Localfy');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function findYtDlp() {
+  const { execSync } = require('child_process');
+  const candidates = [
+    'yt-dlp',
+    'yt-dlp.exe',
+    path.join(app.getPath('userData'), 'yt-dlp.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'yt-dlp', 'yt-dlp.exe'),
+  ];
+  for (const c of candidates) {
+    try { execSync(`"${c}" --version`, { stdio: 'ignore', timeout: 5000 }); return c; }
+    catch { continue; }
+  }
+  return null;
+}
+
+ipcMain.handle('download:checkYtDlp', () => {
+  const ytDlp = findYtDlp();
+  return { available: !!ytDlp, path: ytDlp };
+});
+
+async function downloadSingleTrack(track) {
+  return new Promise((resolve) => {
+    const ytDlp = findYtDlp();
+    if (!ytDlp) {
+      mainWindow?.webContents.send('download:progress', {
+        trackId: track.id, status: 'failed', progress: 0,
+        title: track.title, artist: track.artist, error: 'yt-dlp not found',
+      });
+      resolve({ success: false, error: 'yt-dlp not found' });
+      return;
+    }
+
+    const downloadDir = getDownloadPath();
+    const safeName    = `${track.artist} - ${track.title}`
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').substring(0, 100);
+    const outTemplate = path.join(downloadDir, `${safeName}.%(ext)s`);
+
+    const args = [
+      `ytsearch1:${track.artist} ${track.title} audio`,
+      '-x', '--audio-format', 'mp3', '--audio-quality', '0',
+      '-o', outTemplate,
+      '--no-playlist', '--socket-timeout', '30', '--retries', '3', '--no-part',
+    ];
+
+    mainWindow?.webContents.send('download:progress', {
+      trackId: track.id, status: 'downloading', progress: 0,
+      title: track.title, artist: track.artist,
+    });
+
+    const proc = spawn(ytDlp, args, { windowsHide: true });
+
+    proc.stdout.on('data', (chunk) => {
+      const pct = chunk.toString().match(/(\d+\.?\d*)%/);
+      if (pct) {
+        mainWindow?.webContents.send('download:progress', {
+          trackId: track.id, status: 'downloading', progress: parseFloat(pct[1]),
+          title: track.title, artist: track.artist,
+        });
+      }
+    });
+
+    proc.stderr.on('data', () => {});
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        let foundPath = null;
+        try {
+          const base  = safeName.substring(0, 40).toLowerCase();
+          const files = fs.readdirSync(downloadDir);
+          const match = files.find(f =>
+            f.toLowerCase().startsWith(base) &&
+            /\.(mp3|m4a|opus|webm)$/.test(f)
+          );
+          if (match) foundPath = path.join(downloadDir, match);
+          const exact = path.join(downloadDir, `${safeName}.mp3`);
+          if (!foundPath && fs.existsSync(exact)) foundPath = exact;
+        } catch {}
+
+        if (foundPath) {
+          db.updateTrackDownloaded(track.id, foundPath);
+          mainWindow?.webContents.send('download:progress', {
+            trackId: track.id, status: 'done', progress: 100,
+            title: track.title, artist: track.artist, filePath: foundPath,
+          });
+          resolve({ success: true, filePath: foundPath });
+        } else {
+          mainWindow?.webContents.send('download:progress', {
+            trackId: track.id, status: 'failed', progress: 0,
+            title: track.title, artist: track.artist, error: 'File not found after download',
+          });
+          resolve({ success: false, error: 'File not found after download' });
+        }
+      } else {
+        mainWindow?.webContents.send('download:progress', {
+          trackId: track.id, status: 'failed', progress: 0,
+          title: track.title, artist: track.artist, error: `Exit code ${code}`,
+        });
+        resolve({ success: false, error: `yt-dlp exit code ${code}` });
+      }
+    });
+
+    proc.on('error', (err) => {
+      mainWindow?.webContents.send('download:progress', {
+        trackId: track.id, status: 'failed', progress: 0,
+        title: track.title, artist: track.artist, error: err.message,
+      });
+      resolve({ success: false, error: err.message });
+    });
+  });
+}
+
+async function processDownloadQueue() {
+  if (isDownloading || downloadQueue.length === 0) return;
+  isDownloading = true;
+  while (downloadQueue.length > 0) {
+    await downloadSingleTrack(downloadQueue.shift());
+  }
+  isDownloading = false;
+}
+
+ipcMain.handle('download:track', async (_, track) => {
+  if (!db.getTrackBySpotifyId(track.spotify_id)) db.upsertTrack(track);
+  const saved = db.getTrackBySpotifyId(track.spotify_id);
+  downloadQueue.push(saved || track);
+  processDownloadQueue();
+  return { queued: true };
+});
+
+ipcMain.handle('download:all', async (_, tracks) => {
+  for (const track of tracks) {
+    if (!db.getTrackBySpotifyId(track.spotify_id)) db.upsertTrack(track);
+    downloadQueue.push(db.getTrackBySpotifyId(track.spotify_id) || track);
+  }
+  processDownloadQueue();
+  return { queued: tracks.length };
+});
+
+ipcMain.handle('download:getStats',   ()  => db.getQueueStats());
+ipcMain.handle('download:getQueue',   ()  => db.getQueueItems());
+ipcMain.handle('download:clearQueue', ()  => { downloadQueue = []; db.clearQueue(); });
+
+ipcMain.handle('download:retryFailed', async () => {
+  const failed = db.getQueueItems().filter(i => i.status === 'failed');
+  for (const item of failed) {
+    const t = db.getAllDownloadedTracks().find(t => t.id === item.track_id);
+    if (t) downloadQueue.push(t);
+  }
+  processDownloadQueue();
+  return { requeued: failed.length };
+});
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
+ipcMain.handle('settings:get',             (_, k, d) => getSetting(k, d));
+ipcMain.handle('settings:set',             (_, k, v) => setSetting(k, v));
+ipcMain.handle('settings:getDownloadPath', ()         => getDownloadPath());
+
+ipcMain.handle('settings:chooseDownloadPath', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'], title: 'Choose Download Folder',
+  });
+  if (!result.canceled && result.filePaths[0]) {
+    setSetting('downloadPath', result.filePaths[0]);
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+ipcMain.handle('settings:deleteAllFiles', async () => {
+  const dlPath = getDownloadPath();
+  try {
+    const files = fs.readdirSync(dlPath)
+      .filter(f => /\.(mp3|m4a|opus|webm)$/.test(f));
+    for (const f of files) {
+      try { fs.unlinkSync(path.join(dlPath, f)); } catch {}
+    }
+    db.deleteAllDownloads();
+    db.clearQueue();
+    return { success: true, deleted: files.length };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+// ─── Player ───────────────────────────────────────────────────────────────────
+
+ipcMain.handle('player:getFileUrl', (_, filePath) => {
+  if (!filePath) return null;
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    // Convert Windows backslashes and return a standard file:// URL
+    // Windows: C:\Music\song.mp3  →  file:///C:/Music/song.mp3
+    const normalized = filePath.replace(/\\/g, '/');
+    const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`;
+    return fileUrl;
+  } catch { return null; }
+});
+
+// ─── Window controls ──────────────────────────────────────────────────────────
+
+ipcMain.on('window:minimize', () => mainWindow?.minimize());
+ipcMain.on('window:maximize', () => {
+  if (!mainWindow) return;
+  mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
+});
+
+// ─── Discord Rich Presence ────────────────────────────────────────────────────
+
+let discordClient = null;
+let discordReady = false;
+
+function initDiscord(clientId) {
+  if (!clientId) return;
+  try {
+    const DiscordRPC = require('discord-rpc');
+    DiscordRPC.register(clientId);
+    if (discordClient) {
+      try { discordClient.destroy(); } catch {}
+      discordClient = null;
+      discordReady = false;
+    }
+    discordClient = new DiscordRPC.Client({ transport: 'ipc' });
+    discordClient.on('ready', () => { discordReady = true; });
+    discordClient.login({ clientId }).catch((err) => {
+      console.warn('[Discord RPC] Login failed:', err.message);
+      discordReady = false;
+    });
+  } catch (err) {
+    console.warn('[Discord RPC] Init failed:', err.message);
+  }
+}
+
+app.whenReady().then(() => {
+  const clientId = getSetting('discord.clientId', '');
+  if (clientId) initDiscord(clientId);
+}).catch(() => {});
+
+ipcMain.handle('discord:setClientId', (_, clientId) => {
+  setSetting('discord.clientId', clientId);
+  if (clientId) initDiscord(clientId);
+  else {
+    if (discordClient) { try { discordClient.destroy(); } catch {} discordClient = null; discordReady = false; }
+  }
+  return { success: true };
+});
+
+ipcMain.handle('discord:getClientId', () => getSetting('discord.clientId', ''));
+
+ipcMain.handle('discord:updatePresence', (_, data) => {
+  if (!discordReady || !discordClient) return;
+  try {
+    const cap = (s, n) => s && s.length > n ? s.substring(0, n - 1) + '…' : (s || '');
+    const imageKey = data.albumArt && data.albumArt.startsWith('https://') ? data.albumArt : 'localfy';
+    const activity = {
+      details: cap(data.title, 128) || 'Unknown Track',
+      state: cap(data.artist, 128) || 'Unknown Artist',
+      largeImageKey: imageKey,
+      instance: false,
+    };
+    // Compute startTimestamp here (in main process, right before RPC fires) to
+    // avoid IPC-round-trip delay. data.elapsedSeconds tells us how far into the
+    // track we are; omitting it means we're paused (Discord stops the timer).
+    if (typeof data.elapsedSeconds === 'number') {
+      activity.startTimestamp = Math.floor(Date.now() / 1000) - Math.floor(data.elapsedSeconds);
+    }
+    discordClient.setActivity(activity);
+  } catch (err) {
+    console.warn('[Discord RPC] setActivity failed:', err.message);
+  }
+});
+
+ipcMain.handle('discord:clearPresence', () => {
+  if (discordReady && discordClient) {
+    try { discordClient.clearActivity(); } catch {}
+  }
+});
+
+// ─── Misc ─────────────────────────────────────────────────────────────────────
+
+ipcMain.handle('misc:openExternal', (_, u) => shell.openExternal(u));
+ipcMain.handle('misc:getVersion',   ()      => app.getVersion());
