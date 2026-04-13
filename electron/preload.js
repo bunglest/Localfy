@@ -135,6 +135,16 @@ const api = {
   discordClearPresence: () => ipcRenderer.invoke('discord:clearPresence'),
   discordGetClientId: () => ipcRenderer.invoke('discord:getClientId'),
 
+  // ─── Auto-Updater ──────────────────────────────────────────────────────────
+  updaterCheck: () => ipcRenderer.invoke('updater:check'),
+  updaterDownload: () => ipcRenderer.invoke('updater:download'),
+  updaterInstall: () => ipcRenderer.invoke('updater:install'),
+  onUpdaterStatus: (cb) => {
+    const listener = (_, data) => cb(data);
+    ipcRenderer.on('updater:status', listener);
+    return () => ipcRenderer.removeListener('updater:status', listener);
+  },
+
   // ─── Misc ──────────────────────────────────────────────────────────────────
   openExternal: (url) => ipcRenderer.invoke('misc:openExternal', url),
   getVersion: () => ipcRenderer.invoke('misc:getVersion'),

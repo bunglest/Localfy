@@ -5,6 +5,7 @@ const { spawn, execSync } = require('child_process');
 const crypto = require('crypto');
 
 const isDev = process.env.NODE_ENV === 'development';
+const { autoUpdater } = require('electron-updater');
 
 let tray = null;
 let isQuitting = false;
@@ -125,6 +126,56 @@ app.on('activate', () => { if (!mainWindow) createWindow(); });
 app.on('will-quit', () => { globalShortcut.unregisterAll(); });
 
 ipcMain.handle('window:close', () => { isQuitting = true; app.quit(); });
+
+// ─── Auto-Updater ────────────────────────────────────────────────────────────
+
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true;
+autoUpdater.logger = { info: (...a) => console.log('[updater]', ...a), warn: (...a) => console.warn('[updater]', ...a), error: (...a) => console.error('[updater]', ...a) };
+
+function sendUpdateStatus(status, data = {}) {
+  if (mainWindow) mainWindow.webContents.send('updater:status', { status, ...data });
+}
+
+autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
+autoUpdater.on('update-available', (info) => sendUpdateStatus('available', { version: info.version, releaseNotes: info.releaseNotes }));
+autoUpdater.on('update-not-available', () => sendUpdateStatus('up-to-date'));
+autoUpdater.on('download-progress', (progress) => sendUpdateStatus('downloading', { percent: Math.round(progress.percent), bytesPerSecond: progress.bytesPerSecond, total: progress.total, transferred: progress.transferred }));
+autoUpdater.on('update-downloaded', (info) => sendUpdateStatus('ready', { version: info.version }));
+autoUpdater.on('error', (err) => sendUpdateStatus('error', { message: err?.message || 'Update check failed' }));
+
+ipcMain.handle('updater:check', async () => {
+  if (isDev) return { status: 'dev', message: 'Updates disabled in dev mode' };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { status: 'ok', updateInfo: result?.updateInfo };
+  } catch (err) {
+    return { status: 'error', message: err.message };
+  }
+});
+
+ipcMain.handle('updater:download', async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { status: 'ok' };
+  } catch (err) {
+    return { status: 'error', message: err.message };
+  }
+});
+
+ipcMain.handle('updater:install', () => {
+  isQuitting = true;
+  autoUpdater.quitAndInstall(false, true);
+});
+
+// Check for updates 30 seconds after launch (production only)
+app.whenReady().then(() => {
+  if (!isDev) {
+    setTimeout(() => {
+      autoUpdater.checkForUpdates().catch(() => {});
+    }, 30_000);
+  }
+});
 
 // ─── Settings helpers ─────────────────────────────────────────────────────────
 

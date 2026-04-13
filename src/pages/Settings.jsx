@@ -25,6 +25,7 @@ export default function Settings() {
   const [audioFormat, setAudioFormat] = useState('mp3');
   const [audioQuality, setAudioQuality] = useState('0');
   const { theme, toggleTheme } = useUIStore();
+  const [updateStatus, setUpdateStatus] = useState(null); // null | { status, version?, percent?, message? }
 
   useEffect(() => {
     loadDownloadPath();
@@ -44,7 +45,11 @@ export default function Settings() {
         setTimeout(() => setImportProgress(null), 2000);
       }
     });
-    return unsub;
+    const unsubUpdater = window.localfy.onUpdaterStatus?.((data) => setUpdateStatus(data));
+    return () => {
+      if (typeof unsub === 'function') unsub();
+      if (typeof unsubUpdater === 'function') unsubUpdater();
+    };
   }, []);
 
   const loadDownloadPath = async () => {
@@ -495,6 +500,72 @@ export default function Settings() {
               <span>{desc}</span>
             </div>
           ))}
+        </div>
+      </SettingsSection>
+
+      {/* Updates */}
+      <SettingsSection title="Updates">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={async () => {
+              setUpdateStatus({ status: 'checking' });
+              await window.localfy.updaterCheck();
+            }}
+            disabled={updateStatus?.status === 'checking' || updateStatus?.status === 'downloading'}
+          >
+            {updateStatus?.status === 'checking' ? 'Checking…' : 'Check for Updates'}
+          </button>
+
+          {updateStatus?.status === 'available' && (
+            <>
+              <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>
+                v{updateStatus.version} available!
+              </span>
+              <button className="btn btn-primary btn-sm" onClick={() => window.localfy.updaterDownload()}>
+                Download Update
+              </button>
+            </>
+          )}
+
+          {updateStatus?.status === 'downloading' && (
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 4 }}>
+                Downloading… {updateStatus.percent || 0}%
+              </div>
+              <div style={{ height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', background: 'var(--pink)', borderRadius: 2,
+                  width: `${updateStatus.percent || 0}%`, transition: 'width 0.3s',
+                }} />
+              </div>
+            </div>
+          )}
+
+          {updateStatus?.status === 'ready' && (
+            <>
+              <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>
+                v{updateStatus.version} ready to install
+              </span>
+              <button className="btn btn-primary btn-sm" onClick={() => window.localfy.updaterInstall()}>
+                Restart & Install
+              </button>
+            </>
+          )}
+
+          {updateStatus?.status === 'up-to-date' && (
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>You're on the latest version</span>
+          )}
+
+          {updateStatus?.status === 'error' && (
+            <span style={{ fontSize: 12, color: 'var(--red)' }}>
+              {updateStatus.message || 'Update check failed'}
+            </span>
+          )}
+
+          {updateStatus?.status === 'dev' && (
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>Updates disabled in dev mode</span>
+          )}
         </div>
       </SettingsSection>
 
