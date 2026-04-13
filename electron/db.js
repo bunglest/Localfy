@@ -18,6 +18,8 @@ let store = {
   queue: [],          // [{id, trackId, status, progress, error, createdAt}]
   settings: {},       // key -> value string
   playHistory: [],    // [{id, trackId, playedAt, duration_ms}]
+  skipHistory: [],    // [{id, trackId, listenedMs, totalMs, skippedAt}]
+  recFeedback: [],    // [{trackId, action, strategy, timestamp}]
 };
 
 let dataDir = null;
@@ -443,6 +445,179 @@ function getAllSpotifyIds() {
     .filter(Boolean);
 }
 
+function getPlayHistory() {
+  ensureReady();
+  return Array.isArray(store.playHistory) ? store.playHistory : [];
+}
+
+function getTrackById(id) {
+  ensureReady();
+  return store.tracks[id] || null;
+}
+
+function getTopPlayedSpotifyIds(limit = 50) {
+  ensureReady();
+  const history = Array.isArray(store.playHistory) ? store.playHistory : [];
+  const playCountMap = {};
+  for (const h of history) {
+    playCountMap[h.trackId] = (playCountMap[h.trackId] || 0) + 1;
+  }
+  return Object.entries(playCountMap)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([trackId]) => {
+      const track = store.tracks[trackId];
+      return track ? track.spotify_id : null;
+    })
+    .filter(Boolean);
+}
+
+function getRecentPlayedSpotifyIds(limit = 10) {
+  ensureReady();
+  const history = Array.isArray(store.playHistory) ? store.playHistory : [];
+  const seen = new Set();
+  const result = [];
+  for (let i = history.length - 1; i >= 0 && result.length < limit; i--) {
+    const track = store.tracks[history[i].trackId];
+    if (track && track.spotify_id && !seen.has(track.spotify_id)) {
+      seen.add(track.spotify_id);
+      result.push(track.spotify_id);
+    }
+  }
+  return result;
+}
+
+// ─── SKIP TRACKING ──────────────────────────────────────────────────────────
+
+function recordSkip(trackId, listenedMs, totalMs) {
+  ensureReady();
+  if (!Array.isArray(store.skipHistory)) store.skipHistory = [];
+  store.skipHistory.push({
+    id: crypto.randomUUID(),
+    trackId,
+    listenedMs,
+    totalMs,
+    skippedAt: new Date().toISOString(),
+  });
+  if (store.skipHistory.length > 5000) {
+    store.skipHistory = store.skipHistory.slice(-5000);
+  }
+  saveKey('skipHistory');
+}
+
+function getSkipHistory() {
+  ensureReady();
+  return Array.isArray(store.skipHistory) ? store.skipHistory : [];
+}
+
+function getSkipRate(trackId) {
+  ensureReady();
+  const history = Array.isArray(store.playHistory) ? store.playHistory : [];
+  const skips = Array.isArray(store.skipHistory) ? store.skipHistory : [];
+  const playCount = history.filter(h => h.trackId === trackId).length;
+  const skipCount = skips.filter(s => s.trackId === trackId).length;
+  const total = playCount + skipCount;
+  return total === 0 ? 0 : skipCount / total;
+}
+
+function getFrequentlySkippedArtists() {
+  ensureReady();
+  const history = Array.isArray(store.playHistory) ? store.playHistory : [];
+  const skips = Array.isArray(store.skipHistory) ? store.skipHistory : [];
+
+  // Aggregate plays by artist
+  const artistPlays = {};
+  for (const h of history) {
+    const track = store.tracks[h.trackId];
+    if (!track || !track.artist) continue;
+    const artists = track.artist.split(', ');
+    for (const a of artists) {
+      if (!a) continue;
+      if (!artistPlays[a]) artistPlays[a] = { plays: 0, skips: 0 };
+      artistPlays[a].plays++;
+    }
+  }
+
+  // Aggregate skips by artist
+  for (const s of skips) {
+    const track = store.tracks[s.trackId];
+    if (!track || !track.artist) continue;
+    const artists = track.artist.split(', ');
+    for (const a of artists) {
+      if (!a) continue;
+      if (!artistPlays[a]) artistPlays[a] = { plays: 0, skips: 0 };
+      artistPlays[a].skips++;
+    }
+  }
+
+  // Return artists with >60% skip rate
+  const result = [];
+  for (const [artist, data] of Object.entries(artistPlays)) {
+    const total = data.plays + data.skips;
+    if (total > 0 && data.skips / total > 0.6) {
+      result.push({ artist, skipRate: data.skips / total, total });
+    }
+  }
+  return result;
+}
+
+// ─── RECOMMENDATION FEEDBACK ────────────────────────────────────────────────
+
+function recordRecFeedback(trackId, action, strategy) {
+  ensureReady();
+  if (!Array.isArray(store.recFeedback)) store.recFeedback = [];
+  store.recFeedback.push({
+    trackId,
+    action,
+    strategy,
+    timestamp: new Date().toISOString(),
+  });
+  if (store.recFeedback.length > 5000) {
+    store.recFeedback = store.recFeedback.slice(-5000);
+  }
+  saveKey('recFeedback');
+}
+
+function getRecFeedbackStats() {
+  ensureReady();
+  const feedback = Array.isArray(store.recFeedback) ? store.recFeedback : [];
+
+  const strategyStats = {};
+  for (const entry of feedback) {
+    const s = entry.strategy || 'unknown';
+    if (!strategyStats[s]) {
+      strategyStats[s] = { played: 0, saved: 0, downloaded: 0, skipped: 0, ignored: 0, total: 0 };
+    }
+    strategyStats[s].total++;
+    if (strategyStats[s][entry.action] !== undefined) {
+      strategyStats[s][entry.action]++;
+    }
+  }
+
+  // Overall conversion rate
+  let totalAll = 0;
+  let convertedAll = 0;
+  let bestStrategy = null;
+  let bestConversion = -1;
+
+  for (const [strategy, stats] of Object.entries(strategyStats)) {
+    totalAll += stats.total;
+    const converted = stats.played + stats.saved + stats.downloaded;
+    convertedAll += converted;
+    const conversion = stats.total > 0 ? converted / stats.total : 0;
+    if (conversion > bestConversion) {
+      bestConversion = conversion;
+      bestStrategy = strategy;
+    }
+  }
+
+  return {
+    perStrategy: strategyStats,
+    overallConversionRate: totalAll > 0 ? convertedAll / totalAll : 0,
+    bestPerformingStrategy: bestStrategy,
+  };
+}
+
 function updatePlaylistImage(playlistId, imagePath) {
   ensureReady();
   if (store.playlists[playlistId]) {
@@ -576,4 +751,7 @@ module.exports = {
   findDuplicates,
   removeTrackFromPlaylist,
   reorderPlaylistTrack,
+  getPlayHistory, getTrackById, getTopPlayedSpotifyIds, getRecentPlayedSpotifyIds,
+  recordSkip, getSkipHistory, getSkipRate, getFrequentlySkippedArtists,
+  recordRecFeedback, getRecFeedbackStats,
 };

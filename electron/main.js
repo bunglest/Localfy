@@ -457,6 +457,13 @@ ipcMain.handle('spotify:getDiscoverTracks', async () => {
 // ─── DB Handlers ─────────────────────────────────────────────────────────────
 
 const db = require('./db');
+const { getSmartRecommendations } = require('./recommendations');
+
+// ─── Smart Recommendations ──────────────────────────────────────────────────
+
+ipcMain.handle('recommendations:get', async () => {
+  return getSmartRecommendations(db, spotifyFetch, cachedSpotifyFetch);
+});
 
 ipcMain.handle('db:getDownloaded',      ()       => db.getAllDownloadedTracks());
 ipcMain.handle('db:getLiked',           ()       => db.getAllLikedTracks());
@@ -493,6 +500,14 @@ ipcMain.handle('db:renameFolder',        (_, id, name) => db.renameFolder(id, na
 ipcMain.handle('db:removeTrackFromPlaylist', (_, playlistId, trackId) => db.removeTrackFromPlaylist(playlistId, trackId));
 ipcMain.handle('db:reorderPlaylistTrack', (_, playlistId, trackId, newPosition) => db.reorderPlaylistTrack(playlistId, trackId, newPosition));
 ipcMain.handle('db:findDuplicates', () => db.findDuplicates());
+
+// ─── Skip Detection ─────────────────────────────────────────────────────────
+ipcMain.handle('db:recordSkip',           (_, trackId, listenedMs, totalMs) => db.recordSkip(trackId, listenedMs, totalMs));
+ipcMain.handle('db:getSkipHistory',       () => db.getSkipHistory());
+
+// ─── Recommendation Feedback ────────────────────────────────────────────────
+ipcMain.handle('db:recordRecFeedback',    (_, trackId, action, strategy) => db.recordRecFeedback(trackId, action, strategy));
+ipcMain.handle('db:getRecFeedbackStats',  () => db.getRecFeedbackStats());
 
 // ─── Backup / Restore ────────────────────────────────────────────────────────
 

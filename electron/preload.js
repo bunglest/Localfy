@@ -25,6 +25,7 @@ const api = {
   spotifyGetRelatedArtists: (id) => ipcRenderer.invoke('spotify:getRelatedArtists', id),
   spotifyGetTopArtists: (range) => ipcRenderer.invoke('spotify:getTopArtists', range),
   spotifyGetDiscoverTracks: () => ipcRenderer.invoke('spotify:getDiscoverTracks'),
+  getSmartRecommendations: () => ipcRenderer.invoke('recommendations:get'),
 
   // ─── Library / DB ──────────────────────────────────────────────────────────
   dbGetDownloaded: () => ipcRenderer.invoke('db:getDownloaded'),
@@ -50,6 +51,9 @@ const api = {
   dbRemoveTrackFromPlaylist: (playlistId, trackId) => ipcRenderer.invoke('db:removeTrackFromPlaylist', playlistId, trackId),
   dbReorderPlaylistTrack: (playlistId, trackId, newPosition) => ipcRenderer.invoke('db:reorderPlaylistTrack', playlistId, trackId, newPosition),
   dbFindDuplicates: () => ipcRenderer.invoke('db:findDuplicates'),
+  dbRecordSkip: (trackId, listenedMs, totalMs) => ipcRenderer.invoke('db:recordSkip', trackId, listenedMs, totalMs),
+  dbRecordRecFeedback: (trackId, action, strategy) => ipcRenderer.invoke('db:recordRecFeedback', trackId, action, strategy),
+  dbGetRecFeedbackStats: () => ipcRenderer.invoke('db:getRecFeedbackStats'),
   dbExport: () => ipcRenderer.invoke('db:export'),
   dbImport: () => ipcRenderer.invoke('db:import'),
 

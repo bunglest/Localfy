@@ -30,6 +30,8 @@ function NavigationTracker() {
 
 export default function App() {
   const audioRef = useRef(null);
+  const playStartRef = useRef({ trackId: null, startTime: 0, duration: 0 });
+  const trackEndedNaturallyRef = useRef(false);
   const { init, loggedIn, loading } = useAuthStore();
   const showCommandPalette = useUIStore(s => s.showCommandPalette);
   const { setAudioEl, setProgress, setDuration, setPlaying, next, currentTrack } = usePlayerStore();
@@ -59,6 +61,7 @@ export default function App() {
     };
     const onDuration = () => setDuration(audio.duration || 0);
     const onEnded = () => {
+      trackEndedNaturallyRef.current = true;
       const { repeat: r, next: n, currentTrack: ct } = usePlayerStore.getState();
       // Record this play in history
       if (ct?.id && !ct._pending) {
@@ -84,6 +87,31 @@ export default function App() {
       audio.removeEventListener('pause', onPause);
     };
   }, [loggedIn]);
+
+  // Skip detection — fires when currentTrack changes
+  useEffect(() => {
+    const prev = playStartRef.current;
+    // If the previous track ended naturally, it's not a skip
+    if (trackEndedNaturallyRef.current) {
+      trackEndedNaturallyRef.current = false;
+    } else if (prev.trackId && prev.startTime > 0) {
+      const listenedMs = Date.now() - prev.startTime;
+      const totalMs = prev.duration || 0;
+      if (totalMs > 0 && (listenedMs < 30000 || listenedMs < totalMs * 0.25)) {
+        window.localfy.dbRecordSkip(prev.trackId, listenedMs, totalMs).catch(() => {});
+      }
+    }
+    // Update ref for the new track
+    if (currentTrack?.id && !currentTrack._pending) {
+      playStartRef.current = {
+        trackId: currentTrack.id,
+        startTime: Date.now(),
+        duration: currentTrack.duration_ms || 0,
+      };
+    } else {
+      playStartRef.current = { trackId: null, startTime: 0, duration: 0 };
+    }
+  }, [currentTrack?.id, currentTrack?._pending]);
 
   // Subscribe to download progress events
   useEffect(() => {

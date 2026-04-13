@@ -2704,3 +2704,183 @@ input:focus-visible {
   opacity: 0.3;
   cursor: default;
 }
+
+/* ─── Discover Page Redesign ─────────────────────────────────────────────── */
+.discover-tabs { display: flex; gap: 4px; margin-bottom: 24px; }
+.discover-tab {
+  padding: 8px 18px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-body);
+}
+.discover-tab:hover { background: var(--surface-2); }
+.discover-tab.active {
+  background: var(--pink);
+  color: #fff;
+  border-color: var(--pink);
+}
+
+.taste-profile-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 24px;
+}
+.taste-profile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.taste-profile-header h4 {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-2);
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-family: var(--font-mono);
+}
+
+.taste-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.taste-bar-label {
+  width: 90px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.taste-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.taste-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--pink-soft), var(--pink));
+  transition: width 0.6s ease;
+}
+.taste-bar-value {
+  width: 65px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+  text-align: right;
+}
+
+.discover-reason {
+  font-size: 10.5px;
+  color: var(--pink);
+  font-weight: 500;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discover-section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.discover-section-header h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-1);
+  margin: 0;
+}
+.discover-section-desc {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-bottom: 20px;
+}
+
+.discover-empty {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text-3);
+}
+.discover-empty-icon {
+  font-size: 40px;
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+.discover-empty p {
+  font-size: 13px;
+  max-width: 300px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+
+/* ── Smart Mix Cards ───────────────────────────────────────────── */
+.smart-mix-card {
+  padding: 20px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+  min-width: 160px;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.smart-mix-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.smart-mix-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 2px;
+}
+.smart-mix-sub {
+  font-size: 11px;
+  color: rgba(255,255,255,0.7);
+  font-weight: 500;
+}
+
+/* ── Feedback Stats Card ───────────────────────────────────────── */
+.feedback-stats-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.feedback-stats-card h4 {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-family: var(--font-mono);
+  margin: 0 0 10px;
+}
+.feedback-stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+.feedback-stat-value {
+  font-weight: 700;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+}

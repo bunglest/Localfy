@@ -121,6 +121,31 @@ export default function Home() {
           </section>
         )}
 
+        {/* ── Smart Mixes ──────────────────────────────────────────── */}
+        <section className="home-section">
+          <div className="home-section-header">
+            <h2 className="home-section-title">Smart Mixes</h2>
+          </div>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            {[
+              { name: 'Chill Vibes',  gradient: 'linear-gradient(135deg, #667eea, #764ba2)' },
+              { name: 'High Energy',  gradient: 'linear-gradient(135deg, #f093fb, #f5576c)' },
+              { name: 'Feel Good',    gradient: 'linear-gradient(135deg, #4facfe, #00f2fe)' },
+              { name: 'Focus Flow',   gradient: 'linear-gradient(135deg, #43e97b, #38f9d7)' },
+            ].map(mix => (
+              <div
+                key={mix.name}
+                className="smart-mix-card"
+                style={{ background: mix.gradient }}
+                onClick={() => navigate('/discover')}
+              >
+                <div className="smart-mix-title">{mix.name}</div>
+                <div className="smart-mix-sub">Mix</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
         {/* ── Top Tracks ───────────────────────────────────────────── */}
         {topTracks.length > 0 && (
           <section className="home-section">
