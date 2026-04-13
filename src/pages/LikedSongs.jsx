@@ -200,6 +200,7 @@ export default function LikedSongs() {
         ) : (
           <>
             <div className="track-list-header">
+              <span></span><span></span>
               <span>#</span>
               <span>Title</span>
               <span>Album</span>

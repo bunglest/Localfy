@@ -272,7 +272,7 @@ export default function PlaylistPage() {
         ) : (
           <>
             <div className="track-list-header">
-              <span>#</span><span>Title</span><span>Album</span><span>Time</span><span></span>
+              <span></span><span></span><span>#</span><span>Title</span><span>Album</span><span>Time</span><span></span>
             </div>
             {filtered.map((track, i) => (
               <div key={track.id} style={{ display: 'flex', alignItems: 'center' }}>

@@ -134,6 +134,7 @@ export default function Library() {
         ) : (
           <>
             <div className="track-list-header">
+              <span></span><span></span>
               <span>#</span>
               <span>Title</span>
               <span>Album</span>

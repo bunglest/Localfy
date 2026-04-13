@@ -158,7 +158,7 @@ export default function Search() {
               </div>
               <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
                 <div className="track-list-header" style={{ padding: '10px 16px 8px' }}>
-                  <span>#</span><span>Title</span><span>Album</span><span>Time</span><span></span>
+                  <span></span><span></span><span>#</span><span>Title</span><span>Album</span><span>Time</span><span></span>
                 </div>
                 {tracks.slice(0, limit(5, 50)).map((track, i) => (
                   <SearchTrackRow
@@ -301,6 +301,7 @@ function SearchTrackRow({ track, index, onPlay, onDownload }) {
       onMouseLeave={() => setHover(false)}
       onClick={onPlay}
     >
+      <span></span><span></span>
       <div className="track-num">
         {hover
           ? <span className="play-icon"><PlayIcon size={13} /></span>

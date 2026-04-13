@@ -750,7 +750,7 @@ html, body, #root {
 
 .track-list-header {
   display: grid;
-  grid-template-columns: 40px 1fr 200px 60px 80px;
+  grid-template-columns: 18px 20px 40px 1fr 200px 60px 80px;
   padding: 0 14px 8px;
   border-bottom: 1px solid var(--border);
   color: var(--text-3);
@@ -763,7 +763,7 @@ html, body, #root {
 
 .track-row {
   display: grid;
-  grid-template-columns: 40px 1fr 200px 60px 80px;
+  grid-template-columns: 18px 20px 40px 1fr 200px 60px 80px;
   padding: 0 14px;
   height: 52px;
   align-items: center;

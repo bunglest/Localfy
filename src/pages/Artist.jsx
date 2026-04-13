@@ -216,6 +216,7 @@ export default function ArtistPage() {
             <h2 className="section-title">Popular</h2>
             <div className="track-list">
               <div className="track-list-header">
+                <div></div><div></div>
                 <div className="track-num">#</div>
                 <div className="track-info">Title</div>
                 <div className="track-album">Album</div>
