@@ -1,14 +1,25 @@
 import { create } from 'zustand';
 
+// ─── Persistence helpers ─────────────────────────────────────────────────────
+function persistState(key, partialState) {
+  try { localStorage.setItem(`localfy:${key}`, JSON.stringify(partialState)); } catch {}
+}
+function loadPersistedState(key, defaults) {
+  try {
+    const saved = localStorage.getItem(`localfy:${key}`);
+    return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+  } catch { return defaults; }
+}
+
 // ─── Toast helpers ────────────────────────────────────────────────────────────
 let toastId = 0;
 
 export const useToastStore = create((set) => ({
   toasts: [],
-  add: (msg, type = 'info') => {
+  add: (msg, type = 'info', duration = 3500) => {
     const id = ++toastId;
     set(s => ({ toasts: [...s.toasts, { id, msg, type }] }));
-    setTimeout(() => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) })), 3500);
+    if (duration > 0) setTimeout(() => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) })), duration);
   },
   remove: (id) => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) })),
 }));
@@ -19,6 +30,10 @@ export const useAuthStore = create((set, get) => ({
   tokens: null,
   loggedIn: false,
   loading: true,
+  error: null,
+
+  setError: (msg) => set({ error: msg }),
+  clearError: () => set({ error: null }),
 
   init: async () => {
     try {
@@ -54,6 +69,24 @@ export const useAuthStore = create((set, get) => ({
 export const seekingFlag = { current: false };
 
 // ─── Player store ─────────────────────────────────────────────────────────────
+const playerDefaults = loadPersistedState('player', {
+  volume: 0.8,
+  speed: 1,
+  pitchPreserve: true,
+  shuffle: false,
+  repeat: 'off',
+});
+
+function persistPlayerPrefs(state) {
+  persistState('player', {
+    volume: state.volume,
+    speed: state.speed,
+    pitchPreserve: state.pitchPreserve,
+    shuffle: state.shuffle,
+    repeat: state.repeat,
+  });
+}
+
 export const usePlayerStore = create((set, get) => ({
   currentTrack: null,
   queue: [],
@@ -61,11 +94,11 @@ export const usePlayerStore = create((set, get) => ({
   playing: false,
   progress: 0,
   duration: 0,
-  volume: 0.8,
-  speed: 1,
-  pitchPreserve: true,
-  shuffle: false,
-  repeat: 'off', // 'off' | 'all' | 'one'
+  volume: playerDefaults.volume,
+  speed: playerDefaults.speed,
+  pitchPreserve: playerDefaults.pitchPreserve,
+  shuffle: playerDefaults.shuffle,
+  repeat: playerDefaults.repeat,
   audioEl: null,
 
   setAudioEl: (el) => set({ audioEl: el }),
@@ -162,6 +195,55 @@ export const usePlayerStore = create((set, get) => ({
     }
   },
 
+  removeFromQueue: (trackId) => {
+    const { queue, queueIndex, currentTrack } = get();
+    const removeIdx = queue.findIndex(t => t.id === trackId);
+    if (removeIdx === -1) return;
+    const newQueue = queue.filter(t => t.id !== trackId);
+    let newIndex = queueIndex;
+    if (removeIdx < queueIndex) {
+      newIndex = queueIndex - 1;
+    } else if (removeIdx === queueIndex) {
+      // Removed the currently playing track — clamp index
+      newIndex = Math.min(queueIndex, newQueue.length - 1);
+    }
+    set({ queue: newQueue, queueIndex: newIndex });
+  },
+
+  moveInQueue: (fromIndex, toIndex) => {
+    const { queue, queueIndex } = get();
+    if (fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length) return;
+    const newQueue = [...queue];
+    const [moved] = newQueue.splice(fromIndex, 1);
+    newQueue.splice(toIndex, 0, moved);
+    // Adjust queueIndex to follow the currently playing track
+    let newIndex = queueIndex;
+    if (queueIndex === fromIndex) {
+      newIndex = toIndex;
+    } else if (fromIndex < queueIndex && toIndex >= queueIndex) {
+      newIndex = queueIndex - 1;
+    } else if (fromIndex > queueIndex && toIndex <= queueIndex) {
+      newIndex = queueIndex + 1;
+    }
+    set({ queue: newQueue, queueIndex: newIndex });
+  },
+
+  clearQueue: () => {
+    const { audioEl } = get();
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.src = '';
+    }
+    set({ queue: [], queueIndex: -1, currentTrack: null, playing: false, progress: 0, duration: 0 });
+  },
+
+  playFromQueue: (index) => {
+    const { queue } = get();
+    if (index < 0 || index >= queue.length) return;
+    get().playTrack(queue[index], queue);
+    set({ queueIndex: index });
+  },
+
   next: () => {
     const { queue, queueIndex, shuffle, repeat } = get();
     if (!queue.length) return;
@@ -220,13 +302,21 @@ export const usePlayerStore = create((set, get) => ({
     const { audioEl } = get();
     if (audioEl) audioEl.volume = v;
     set({ volume: v });
+    persistPlayerPrefs({ ...get(), volume: v });
   },
 
-  toggleShuffle: () => set(s => ({ shuffle: !s.shuffle })),
+  toggleShuffle: () => {
+    const next = !get().shuffle;
+    set({ shuffle: next });
+    persistPlayerPrefs({ ...get(), shuffle: next });
+  },
 
-  toggleRepeat: () => set(s => ({
-    repeat: s.repeat === 'off' ? 'all' : s.repeat === 'all' ? 'one' : 'off'
-  })),
+  toggleRepeat: () => {
+    const curr = get().repeat;
+    const next = curr === 'off' ? 'all' : curr === 'all' ? 'one' : 'off';
+    set({ repeat: next });
+    persistPlayerPrefs({ ...get(), repeat: next });
+  },
 
   setProgress: (p) => set({ progress: p }),
   setDuration: (d) => set({ duration: d }),
@@ -239,6 +329,7 @@ export const usePlayerStore = create((set, get) => ({
       audioEl.preservesPitch = get().pitchPreserve;
     }
     set({ speed: s });
+    persistPlayerPrefs({ ...get(), speed: s });
   },
 
   togglePitchPreserve: () => {
@@ -246,6 +337,7 @@ export const usePlayerStore = create((set, get) => ({
     const next = !pitchPreserve;
     if (audioEl) audioEl.preservesPitch = next;
     set({ pitchPreserve: next });
+    persistPlayerPrefs({ ...get(), pitchPreserve: next });
   },
 }));
 
@@ -279,6 +371,24 @@ export const useLibraryStore = create((set, get) => ({
     const newLiked = await window.localfy.dbToggleLike(track);
     await get().loadLiked();
     return newLiked;
+  },
+
+  addToPlaylist: async (playlistId, tracks) => {
+    const trackList = Array.isArray(tracks) ? tracks : [tracks];
+    for (const track of trackList) {
+      await window.localfy.dbAddToPlaylist(playlistId, track);
+    }
+    await get().loadPlaylists();
+  },
+
+  removeFromPlaylist: async (playlistId, trackId) => {
+    await window.localfy.dbRemoveTrackFromPlaylist(playlistId, trackId);
+    await get().loadPlaylists();
+  },
+
+  reorderTrack: async (playlistId, trackId, newPos) => {
+    await window.localfy.dbReorderPlaylistTrack(playlistId, trackId, newPos);
+    await get().loadPlaylists();
   },
 
   refresh: async () => {
@@ -353,4 +463,113 @@ export const useDownloadStore = create((set, get) => ({
     set({ queue: [], activeDownloads: {} });
     get().loadStats();
   },
+}));
+
+// ─── UI Preferences store ────────────────────────────────────────────────────
+const uiDefaults = loadPersistedState('ui', { theme: 'dark', sidebarCollapsed: false });
+
+export const useUIStore = create((set, get) => ({
+  // Persisted
+  theme: uiDefaults.theme,
+  sidebarCollapsed: uiDefaults.sidebarCollapsed,
+
+  // Non-persisted
+  showQueue: false,
+  showCommandPalette: false,
+  showEqualizer: false,
+  showLyrics: false,
+  navigationHistory: [],
+  navigationIndex: -1,
+
+  // Actions
+  setTheme: (theme) => {
+    set({ theme });
+    persistState('ui', { theme, sidebarCollapsed: get().sidebarCollapsed });
+    document.documentElement.setAttribute('data-theme', theme);
+  },
+  toggleTheme: () => {
+    const t = get().theme === 'dark' ? 'light' : 'dark';
+    get().setTheme(t);
+  },
+  toggleSidebar: () => {
+    const v = !get().sidebarCollapsed;
+    set({ sidebarCollapsed: v });
+    persistState('ui', { theme: get().theme, sidebarCollapsed: v });
+  },
+  toggleQueue: () => set(s => ({ showQueue: !s.showQueue })),
+  toggleCommandPalette: () => set(s => ({ showCommandPalette: !s.showCommandPalette })),
+  toggleEqualizer: () => set(s => ({ showEqualizer: !s.showEqualizer })),
+  toggleLyrics: () => set(s => ({ showLyrics: !s.showLyrics })),
+
+  // Navigation history
+  pushNavigation: (path) => {
+    const { navigationHistory, navigationIndex } = get();
+    const newHistory = [...navigationHistory.slice(0, navigationIndex + 1), path];
+    set({ navigationHistory: newHistory, navigationIndex: newHistory.length - 1 });
+  },
+  goBack: () => {
+    const { navigationIndex } = get();
+    if (navigationIndex > 0) set({ navigationIndex: navigationIndex - 1 });
+    return get().navigationHistory[get().navigationIndex] || null;
+  },
+  goForward: () => {
+    const { navigationHistory, navigationIndex } = get();
+    if (navigationIndex < navigationHistory.length - 1) set({ navigationIndex: navigationIndex + 1 });
+    return get().navigationHistory[get().navigationIndex] || null;
+  },
+  canGoBack: () => get().navigationIndex > 0,
+  canGoForward: () => get().navigationIndex < get().navigationHistory.length - 1,
+}));
+
+// Apply initial theme on load
+document.documentElement.setAttribute('data-theme', useUIStore.getState().theme);
+
+// ─── Search History store ─────────────────────────────────────────────────────
+export const useSearchStore = create((set, get) => ({
+  recentSearches: loadPersistedState('search', { recentSearches: [] }).recentSearches,
+
+  addSearch: (query) => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    const filtered = get().recentSearches.filter(s => s !== trimmed);
+    const updated = [trimmed, ...filtered].slice(0, 10);
+    set({ recentSearches: updated });
+    persistState('search', { recentSearches: updated });
+  },
+
+  clearSearchHistory: () => {
+    set({ recentSearches: [] });
+    persistState('search', { recentSearches: [] });
+  },
+
+  removeSearch: (query) => {
+    const updated = get().recentSearches.filter(s => s !== query);
+    set({ recentSearches: updated });
+    persistState('search', { recentSearches: updated });
+  },
+}));
+
+// ─── Multi-Select store ──────────────────────────────────────────────────────
+export const useSelectionStore = create((set, get) => ({
+  selectedTracks: new Set(),
+  selectionMode: false,
+
+  toggleSelect: (trackId) => {
+    const selected = new Set(get().selectedTracks);
+    if (selected.has(trackId)) selected.delete(trackId);
+    else selected.add(trackId);
+    set({ selectedTracks: selected, selectionMode: selected.size > 0 });
+  },
+
+  selectAll: (trackIds) => {
+    set({ selectedTracks: new Set(trackIds), selectionMode: true });
+  },
+
+  clearSelection: () => {
+    set({ selectedTracks: new Set(), selectionMode: false });
+  },
+
+  isSelected: (trackId) => get().selectedTracks.has(trackId),
+
+  getSelectedArray: () => [...get().selectedTracks],
 }));

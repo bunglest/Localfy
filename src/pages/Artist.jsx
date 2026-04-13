@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { usePlayerStore, useToastStore, useDownloadStore } from '../store';
 import TrackRow from '../components/TrackRow';
 import { PlayIcon, DownloadIcon } from '../components/Icons';
+import { SkeletonRows } from '../components/SkeletonPage';
 
 function fmtFollowers(n) {
   if (!n) return '';
@@ -153,8 +154,8 @@ export default function ArtistPage() {
 
   if (loading) {
     return (
-      <div className="page-loading">
-        <div className="spinner" />
+      <div style={{ padding: '28px 32px 48px' }}>
+        <SkeletonRows />
       </div>
     );
   }

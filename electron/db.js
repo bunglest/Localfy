@@ -324,12 +324,13 @@ function clearQueue() {
 function getSetting(key, defaultVal) {
   ensureReady();
   const v = store.settings[key];
-  return v !== undefined ? v : defaultVal;
+  if (v === undefined) return defaultVal;
+  try { return JSON.parse(v); } catch { return v; }
 }
 
 function setSetting(key, value) {
   ensureReady();
-  store.settings[key] = String(value);
+  store.settings[key] = JSON.stringify(value);
   saveKey('settings');
 }
 
@@ -344,7 +345,10 @@ function recordPlay(trackId, durationMs) {
     playedAt: new Date().toISOString(),
     duration_ms: durationMs || 0,
   });
-  if (store.playHistory.length > 10000) store.playHistory = store.playHistory.slice(-10000);
+  if (store.playHistory.length > 10000) {
+    console.warn('Play history exceeded 10000 entries, oldest entries trimmed');
+    store.playHistory = store.playHistory.slice(-10000);
+  }
   saveKey('playHistory');
   // Also increment play_count on the track
   if (store.tracks[trackId]) {
@@ -471,6 +475,92 @@ function renameFolder(folderId, name) {
   return false;
 }
 
+// ─── BACKUP / RESTORE ───────────────────────────────────────────────────────
+
+function exportAll() {
+  ensureReady();
+  return JSON.stringify(store);
+}
+
+function importAll(jsonString) {
+  ensureReady();
+  store = JSON.parse(jsonString);
+  loaded = true;
+  for (const key of Object.keys(store)) {
+    saveKey(key);
+  }
+}
+
+// ─── PLAYLIST EXPORT / IMPORT ───────────────────────────────────────────────
+
+function exportPlaylist(playlistId) {
+  ensureReady();
+  const playlist = store.playlists[playlistId];
+  if (!playlist) return null;
+  const entries = (store.playlistTracks[playlistId] || [])
+    .sort((a, b) => (a.position || 0) - (b.position || 0));
+  const tracks = entries
+    .map(e => store.tracks[e.trackId])
+    .filter(Boolean);
+  return JSON.stringify({ playlist, tracks });
+}
+
+function importPlaylistFromJson(jsonData) {
+  ensureReady();
+  const data = typeof jsonData === 'string' ? JSON.parse(jsonData) : jsonData;
+  if (!data.playlist) throw new Error('Invalid playlist data');
+  upsertPlaylist(data.playlist);
+  if (Array.isArray(data.tracks)) {
+    for (let i = 0; i < data.tracks.length; i++) {
+      const saved = upsertTrack(data.tracks[i]);
+      addTrackToPlaylist(data.playlist.id, saved.id, i);
+    }
+  }
+  return data.playlist.id;
+}
+
+// ─── DUPLICATE DETECTION ────────────────────────────────────────────────────
+
+function findDuplicates() {
+  ensureReady();
+  const groups = {};
+  for (const t of Object.values(store.tracks)) {
+    const key = `${(t.title || '').toLowerCase().trim()}|${(t.artist || '').toLowerCase().trim()}`;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(t);
+  }
+  return Object.values(groups).filter(g => g.length > 1);
+}
+
+// ─── REMOVE TRACK FROM PLAYLIST ─────────────────────────────────────────────
+
+function removeTrackFromPlaylist(playlistId, trackId) {
+  ensureReady();
+  if (!store.playlistTracks[playlistId]) return false;
+  store.playlistTracks[playlistId] = store.playlistTracks[playlistId].filter(e => e.trackId !== trackId);
+  saveKey('playlistTracks');
+  return true;
+}
+
+// ─── REORDER PLAYLIST TRACKS ────────────────────────────────────────────────
+
+function reorderPlaylistTrack(playlistId, trackId, newPosition) {
+  ensureReady();
+  if (!store.playlistTracks[playlistId]) return false;
+  const entries = store.playlistTracks[playlistId].sort((a, b) => (a.position || 0) - (b.position || 0));
+  const idx = entries.findIndex(e => e.trackId === trackId);
+  if (idx === -1) return false;
+  const [item] = entries.splice(idx, 1);
+  entries.splice(newPosition, 0, item);
+  // Reassign positions
+  for (let i = 0; i < entries.length; i++) {
+    entries[i].position = i;
+  }
+  store.playlistTracks[playlistId] = entries;
+  saveKey('playlistTracks');
+  return true;
+}
+
 module.exports = {
   upsertTrack, getTrackBySpotifyId, getAllDownloadedTracks, getAllLikedTracks,
   updateTrackDownloaded, updateTrackLiked, incrementPlayCount, searchTracks,
@@ -481,4 +571,9 @@ module.exports = {
   addToQueue, updateQueueItem, getQueueStats, getQueueItems, clearQueue,
   getSetting, setSetting,
   recordPlay, getStatsData, getAllSpotifyIds, updatePlaylistImage, renamePlaylist, renameFolder,
+  exportAll, importAll,
+  exportPlaylist, importPlaylistFromJson,
+  findDuplicates,
+  removeTrackFromPlaylist,
+  reorderPlaylistTrack,
 };

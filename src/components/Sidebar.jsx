@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { useLibraryStore, useDownloadStore, useToastStore } from '../store';
+import { useLibraryStore, useDownloadStore, useToastStore, useUIStore } from '../store';
+import ConfirmDialog from './ConfirmDialog';
 import {
   HomeIcon, SearchIcon, LibraryIcon, HeartIcon, DownloadIcon, SettingsIcon,
   FolderIcon, ChevronIcon, PlusIcon, MusicIcon, DiscoverIcon, StatsIcon
@@ -10,6 +11,7 @@ export default function Sidebar() {
   const { playlists, folders, loadPlaylists } = useLibraryStore();
   const { stats } = useDownloadStore();
   const { add: toast } = useToastStore();
+  const { sidebarCollapsed, toggleSidebar } = useUIStore();
   const navigate = useNavigate();
 
   const [openFolders, setOpenFolders] = useState({});
@@ -34,7 +36,7 @@ export default function Sidebar() {
   const queueCount = stats.queued || 0;
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
       {/* Logo */}
       <div className="sidebar-logo">
         <div className="sidebar-logo-icon">
@@ -49,7 +51,7 @@ export default function Sidebar() {
       </div>
 
       {/* Main Nav */}
-      <nav className="sidebar-nav">
+      <nav className="sidebar-nav" aria-label="Main navigation">
         <NavLink to="/" end className={({isActive}) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
           <HomeIcon size={17} /> Home
         </NavLink>
@@ -141,6 +143,26 @@ export default function Sidebar() {
           </div>
         )}
       </div>
+
+      {/* Collapse/expand toggle */}
+      <button
+        onClick={toggleSidebar}
+        title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer',
+          color: 'var(--text-3)', padding: '10px 12px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'color 0.15s',
+          marginTop: 'auto', flexShrink: 0,
+        }}
+        onMouseEnter={e => e.currentTarget.style.color = 'var(--text-1)'}
+        onMouseLeave={e => e.currentTarget.style.color = 'var(--text-3)'}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: sidebarCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
     </aside>
   );
 }
@@ -149,6 +171,7 @@ function FolderItem({ folder, isOpen, onToggle, folderPlaylists, navigate }) {
   const { loadPlaylists } = useLibraryStore();
   const { add: toast } = useToastStore();
   const [contextMenu, setContextMenu] = useState(null);
+  const [confirmState, setConfirmState] = useState(null);
 
   const handleContextMenu = (e) => {
     e.preventDefault();
@@ -172,17 +195,21 @@ function FolderItem({ folder, isOpen, onToggle, folderPlaylists, navigate }) {
     setContextMenu(null);
   };
 
-  const handleDeleteFolder = async () => {
-    const confirmed = window.confirm(`Delete folder "${folder.name}"? Playlists will not be deleted.`);
-    if (confirmed) {
-      try {
-        await window.localfy.dbDeleteFolder(folder.id);
-        await loadPlaylists();
-        toast('Folder deleted', 'success');
-      } catch (e) {
-        toast('Failed to delete folder', 'error');
-      }
-    }
+  const handleDeleteFolder = () => {
+    setConfirmState({
+      title: 'Delete folder',
+      message: `Delete folder "${folder.name}"? Playlists will not be deleted.`,
+      onConfirm: async () => {
+        try {
+          await window.localfy.dbDeleteFolder(folder.id);
+          await loadPlaylists();
+          toast('Folder deleted', 'success');
+        } catch (e) {
+          toast('Failed to delete folder', 'error');
+        }
+        setConfirmState(null);
+      },
+    });
     setContextMenu(null);
   };
 
@@ -214,6 +241,15 @@ function FolderItem({ folder, isOpen, onToggle, folderPlaylists, navigate }) {
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      {confirmState && (
+        <ConfirmDialog
+          title={confirmState.title}
+          message={confirmState.message}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
+        />
+      )}
     </div>
   );
 }
@@ -222,6 +258,7 @@ function PlaylistItem({ pl, navigate }) {
   const { loadPlaylists, folders } = useLibraryStore();
   const { add: toast } = useToastStore();
   const [contextMenu, setContextMenu] = useState(null);
+  const [confirmState, setConfirmState] = useState(null);
 
   const handleContextMenu = (e) => {
     e.preventDefault();
@@ -245,17 +282,21 @@ function PlaylistItem({ pl, navigate }) {
     setContextMenu(null);
   };
 
-  const handleDelete = async () => {
-    const confirmed = window.confirm(`Delete "${pl.name}"? This cannot be undone.`);
-    if (confirmed) {
-      try {
-        await window.localfy.dbDeletePlaylist(pl.id);
-        await loadPlaylists();
-        toast('Playlist deleted', 'success');
-      } catch (e) {
-        toast('Failed to delete playlist', 'error');
-      }
-    }
+  const handleDelete = () => {
+    setConfirmState({
+      title: 'Delete playlist',
+      message: `Delete "${pl.name}"? This cannot be undone.`,
+      onConfirm: async () => {
+        try {
+          await window.localfy.dbDeletePlaylist(pl.id);
+          await loadPlaylists();
+          toast('Playlist deleted', 'success');
+        } catch (e) {
+          toast('Failed to delete playlist', 'error');
+        }
+        setConfirmState(null);
+      },
+    });
     setContextMenu(null);
   };
 
@@ -325,6 +366,15 @@ function PlaylistItem({ pl, navigate }) {
             { label: 'Delete', onClick: handleDelete, danger: true },
           ]}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {confirmState && (
+        <ConfirmDialog
+          title={confirmState.title}
+          message={confirmState.message}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
         />
       )}
     </>

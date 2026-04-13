@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useAuthStore, useLibraryStore, useDownloadStore, useToastStore } from '../store';
+import { useAuthStore, useLibraryStore, useDownloadStore, useToastStore, useUIStore } from '../store';
 import { ImportIcon, TrashIcon, CheckIcon, FolderIcon, AlertIcon, PlusIcon, RefreshIcon } from '../components/Icons';
 
 export default function Settings() {
@@ -22,6 +22,9 @@ export default function Settings() {
   const [appVersion, setAppVersion] = useState('');
   const [discordClientId, setDiscordClientId] = useState('');
   const [discordSaving, setDiscordSaving] = useState(false);
+  const [audioFormat, setAudioFormat] = useState('mp3');
+  const [audioQuality, setAudioQuality] = useState('0');
+  const { theme, toggleTheme } = useUIStore();
 
   useEffect(() => {
     loadDownloadPath();
@@ -29,6 +32,8 @@ export default function Settings() {
     checkYtDlp();
     window.localfy.getVersion().then(v => setAppVersion(v)).catch(() => {});
     window.localfy.discordGetClientId().then(id => setDiscordClientId(id || '')).catch(() => {});
+    window.localfy.settingsGet('audio.format', 'mp3').then(v => setAudioFormat(v)).catch(() => {});
+    window.localfy.settingsGet('audio.quality', '0').then(v => setAudioQuality(String(v))).catch(() => {});
     loadPlaylists();
 
     const unsub = window.localfy.onImportProgress((data) => {
@@ -128,7 +133,7 @@ export default function Settings() {
       await window.localfy.discordSetClientId(discordClientId.trim());
       toast(discordClientId.trim() ? 'Discord Rich Presence enabled!' : 'Discord Rich Presence disabled', 'success');
     } catch (e) {
-      toast('Failed to save Discord settings', 'error');
+      toast('Failed to save Discord settings: ' + e.message, 'error');
     } finally {
       setDiscordSaving(false);
     }
@@ -168,6 +173,83 @@ export default function Settings() {
             </button>
           </div>
         )}
+      </SettingsSection>
+
+      {/* Theme */}
+      <SettingsSection title="Theme">
+        <SettingRow
+          label="Appearance"
+          desc={`Currently using ${theme} mode`}
+        >
+          <div
+            onClick={toggleTheme}
+            style={{
+              display: 'flex', alignItems: 'center',
+              width: 52, height: 28, borderRadius: 99,
+              background: theme === 'dark' ? 'var(--pink)' : 'var(--surface-2)',
+              border: '1px solid var(--border)',
+              cursor: 'pointer', padding: 3,
+              transition: 'background 0.2s',
+              position: 'relative',
+            }}
+          >
+            <div style={{
+              width: 22, height: 22, borderRadius: '50%',
+              background: '#fff',
+              transition: 'transform 0.2s',
+              transform: theme === 'dark' ? 'translateX(24px)' : 'translateX(0)',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+            }} />
+          </div>
+        </SettingRow>
+      </SettingsSection>
+
+      {/* Audio Format */}
+      <SettingsSection title="Audio Format">
+        <SettingRow
+          label="Format"
+          desc="Output file format for downloads"
+        >
+          <select
+            value={audioFormat}
+            onChange={e => {
+              setAudioFormat(e.target.value);
+              window.localfy.settingsSet('audio.format', e.target.value);
+            }}
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              color: 'var(--text-1)', borderRadius: 'var(--radius)',
+              padding: '6px 12px', fontSize: 13, cursor: 'pointer',
+              fontFamily: 'var(--font-body)', outline: 'none',
+            }}
+          >
+            <option value="mp3">MP3</option>
+            <option value="m4a">M4A</option>
+            <option value="opus">Opus</option>
+          </select>
+        </SettingRow>
+        <SettingRow
+          label="Quality"
+          desc="0 = best quality, 9 = smallest file"
+        >
+          <select
+            value={audioQuality}
+            onChange={e => {
+              setAudioQuality(e.target.value);
+              window.localfy.settingsSet('audio.quality', e.target.value);
+            }}
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              color: 'var(--text-1)', borderRadius: 'var(--radius)',
+              padding: '6px 12px', fontSize: 13, cursor: 'pointer',
+              fontFamily: 'var(--font-body)', outline: 'none',
+            }}
+          >
+            <option value="0">0 (Best)</option>
+            <option value="5">5 (Medium)</option>
+            <option value="9">9 (Smallest)</option>
+          </select>
+        </SettingRow>
       </SettingsSection>
 
       {/* Import */}
@@ -351,6 +433,68 @@ export default function Settings() {
         </SettingRow>
         <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4, lineHeight: 1.6 }}>
           When enabled, Localfy shows the track you're currently playing on your Discord profile. Leave blank to disable.
+        </div>
+      </SettingsSection>
+
+      {/* Backup & Restore */}
+      <SettingsSection title="Backup & Restore">
+        <SettingRow
+          label="Export Library"
+          desc="Save your entire library to a backup file"
+        >
+          <button className="btn btn-outline btn-sm" onClick={async () => {
+            try { await window.localfy.dbExport(); toast('Library exported', 'success'); }
+            catch (e) { toast('Export failed: ' + e.message, 'error'); }
+          }}>
+            Export Library
+          </button>
+        </SettingRow>
+        <SettingRow
+          label="Import Library"
+          desc="Restore from a previously exported backup"
+        >
+          <button className="btn btn-outline btn-sm" onClick={async () => {
+            try {
+              await window.localfy.dbImport();
+              await loadPlaylists();
+              await loadLiked();
+              toast('Library imported', 'success');
+            } catch (e) { toast('Import failed: ' + e.message, 'error'); }
+          }}>
+            Import Library
+          </button>
+        </SettingRow>
+      </SettingsSection>
+
+      {/* Keyboard Shortcuts */}
+      <SettingsSection title="Keyboard Shortcuts">
+        <div style={{
+          display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 24px',
+          fontSize: 13, color: 'var(--text-2)',
+        }}>
+          {[
+            ['Space', 'Play / Pause'],
+            ['Ctrl + K', 'Command Palette'],
+            ['Q', 'Toggle Queue'],
+            ['M', 'Mute / Unmute'],
+            ['S', 'Toggle Shuffle'],
+            ['R', 'Toggle Repeat'],
+            ['Ctrl + \u2192', 'Next Track'],
+            ['Ctrl + \u2190', 'Previous Track'],
+            ['Ctrl + \u2191', 'Volume Up'],
+            ['Ctrl + \u2193', 'Volume Down'],
+            ['Ctrl + 1-8', 'Navigate Pages'],
+          ].map(([key, desc]) => (
+            <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
+              <kbd style={{
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                borderRadius: 5, padding: '2px 8px', fontSize: 11,
+                fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-1)',
+                whiteSpace: 'nowrap',
+              }}>{key}</kbd>
+              <span>{desc}</span>
+            </div>
+          ))}
         </div>
       </SettingsSection>
 

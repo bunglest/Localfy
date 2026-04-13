@@ -1,15 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import { useLibraryStore, usePlayerStore } from '../store';
+import { useLibraryStore, usePlayerStore, useSelectionStore, useDownloadStore, useToastStore } from '../store';
 import TrackRow from '../components/TrackRow';
+import { SkeletonRows } from '../components/SkeletonPage';
 import { LibraryIcon, SearchIcon, MusicIcon } from '../components/Icons';
 
 export default function Library() {
   const { downloaded, loadDownloaded } = useLibraryStore();
   const { playTrack } = usePlayerStore();
+  const { selectedTracks, selectionMode, clearSelection } = useSelectionStore();
+  const { downloadAll } = useDownloadStore();
+  const { add: toast } = useToastStore();
   const [filter, setFilter] = useState('');
   const [sort, setSort] = useState('title'); // title | artist | album
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => { loadDownloaded(); }, []);
+  useEffect(() => { loadDownloaded().finally(() => setLoading(false)); }, []);
 
   const filtered = downloaded.filter(t => {
     if (!filter) return true;
@@ -93,9 +98,25 @@ export default function Library() {
         </div>
       </div>
 
+      {/* Bulk actions bar */}
+      {selectionMode && (
+        <div className="bulk-actions-bar" style={{ padding: '10px 28px', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{selectedTracks.size} selected</span>
+          <button className="btn btn-primary btn-sm" onClick={async () => {
+            const tracks = downloaded.filter(t => selectedTracks.has(t.id));
+            const notDl = tracks.filter(t => !t.downloaded);
+            if (notDl.length) { await downloadAll(notDl); toast(`Queued ${notDl.length} songs`, 'info'); }
+          }}>Download Selected</button>
+          <button className="btn btn-outline btn-sm" onClick={() => toast('Add to Playlist coming soon', 'info')}>Add to Playlist</button>
+          <button className="btn btn-ghost btn-sm" onClick={clearSelection}>Clear Selection</button>
+        </div>
+      )}
+
       {/* Track list */}
       <div style={{ padding: '8px 12px 40px' }}>
-        {filtered.length === 0 ? (
+        {loading ? (
+          <SkeletonRows />
+        ) : filtered.length === 0 ? (
           <div className="empty-state">
             <MusicIcon size={64} className="empty-state-icon" />
             {downloaded.length === 0 ? (

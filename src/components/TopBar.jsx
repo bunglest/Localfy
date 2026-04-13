@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuthStore, useToastStore } from '../store';
+import { useAuthStore, useToastStore, useSearchStore, useUIStore } from '../store';
+import BackForward from './BackForward';
 import { SearchIcon, UserIcon, LogoutIcon, SpotifyIcon } from './Icons';
 
 export default function TopBar() {
@@ -12,10 +13,16 @@ export default function TopBar() {
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
   const btnRef = useRef(null);
   const menuRef = useRef(null);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const { recentSearches, removeSearch } = useSearchStore();
 
   const handleSearch = (e) => {
     e.preventDefault();
-    if (search.trim()) navigate(`/search?q=${encodeURIComponent(search.trim())}`);
+    if (search.trim()) {
+      useSearchStore.getState().addSearch(search.trim());
+      navigate(`/search?q=${encodeURIComponent(search.trim())}`);
+      setShowSuggestions(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -47,16 +54,55 @@ export default function TopBar() {
 
   return (
     <header className="topbar">
+      <BackForward />
+
       {/* Search */}
-      <form className="topbar-search" onSubmit={handleSearch}>
+      <form className="topbar-search" onSubmit={handleSearch} style={{ position: 'relative' }}>
         <SearchIcon size={15} className="topbar-search-icon" />
         <input
           type="text"
           placeholder="Search songs, artists, albums…"
+          aria-label="Search songs, artists, albums"
           value={search}
           onChange={e => setSearch(e.target.value)}
+          onFocus={() => setShowSuggestions(true)}
+          onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
         />
+        {showSuggestions && recentSearches.length > 0 && (
+          <div className="search-suggestions">
+            {recentSearches.map((q) => (
+              <div key={q} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', cursor: 'pointer', fontSize: 13, color: 'var(--text-2)', transition: 'background 0.12s' }}
+                onMouseDown={(e) => { e.preventDefault(); setSearch(q); navigate(`/search?q=${encodeURIComponent(q)}`); useSearchStore.getState().addSearch(q); setShowSuggestions(false); }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-2)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q}</span>
+                <button
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', flexShrink: 0, fontSize: 12, lineHeight: 1 }}
+                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); removeSearch(q); }}
+                  title="Remove"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </form>
+
+      {/* Command palette trigger */}
+      <button
+        onClick={() => useUIStore.getState().toggleCommandPalette()}
+        title="Command palette"
+        style={{
+          background: 'var(--surface-2)', border: '1px solid var(--border)',
+          borderRadius: 6, padding: '3px 8px', cursor: 'pointer',
+          fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 600,
+          color: 'var(--text-3)', marginLeft: 6, whiteSpace: 'nowrap',
+        }}
+      >
+        Ctrl+K
+      </button>
 
       <div className="topbar-spacer" />
 

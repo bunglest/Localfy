@@ -39,7 +39,7 @@ export default function PlaylistPage() {
         setImportProgress(data);
       }
     });
-    return unsub;
+    return () => typeof unsub === 'function' && unsub();
   }, [id, playlist?.image_url]);
 
   const loadPlaylistData = async () => {
@@ -217,6 +217,28 @@ export default function PlaylistPage() {
             <DownloadIcon size={14} /> Download All
           </button>
 
+          <button className="btn btn-outline" onClick={() => {
+            window.localfy.playlistExport(id);
+            toast('Playlist exported', 'success');
+          }}>
+            Export
+          </button>
+
+          <button className="btn btn-ghost btn-sm" onClick={async () => {
+            try {
+              const dupes = await window.localfy.dbFindDuplicates();
+              if (dupes && dupes.length > 0) {
+                toast(`Found ${dupes.length} duplicate(s)`, 'info');
+              } else {
+                toast('No duplicates found', 'success');
+              }
+            } catch (e) {
+              toast('Failed to check duplicates: ' + e.message, 'error');
+            }
+          }}>
+            Find Duplicates
+          </button>
+
           <div className="search-bar" style={{ width: 240, height: 36 }}>
             <SearchIcon size={14} style={{ color: 'var(--text-3)' }} />
             <input type="text" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter tracks…" />
@@ -253,7 +275,30 @@ export default function PlaylistPage() {
               <span>#</span><span>Title</span><span>Album</span><span>Time</span><span></span>
             </div>
             {filtered.map((track, i) => (
-              <TrackRow key={track.id} track={track} index={i} queue={filtered} />
+              <div key={track.id} style={{ display: 'flex', alignItems: 'center' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <TrackRow track={track} index={i} queue={filtered} />
+                </div>
+                <button
+                  className="track-action-btn"
+                  title="Remove from playlist"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      await window.localfy.dbRemoveTrackFromPlaylist(id, track.id);
+                      await loadPlaylistData();
+                      toast('Track removed', 'info');
+                    } catch (err) {
+                      toast('Failed to remove: ' + err.message, 'error');
+                    }
+                  }}
+                  style={{ flexShrink: 0, marginRight: 8, color: 'var(--text-3)' }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                  </svg>
+                </button>
+              </div>
             ))}
           </>
         )}
@@ -264,6 +309,7 @@ export default function PlaylistPage() {
 
 /* ── Edit Playlist Modal ───────────────────────────────────────────────── */
 function EditPlaylistModal({ playlist, currentImageUrl, onSave, onClose }) {
+  const { add: toast } = useToastStore();
   const [name, setName] = useState(playlist?.name || '');
   const [imageUrl, setImageUrl] = useState(currentImageUrl || '');
   const [saving, setSaving] = useState(false);
@@ -288,6 +334,10 @@ function EditPlaylistModal({ playlist, currentImageUrl, onSave, onClose }) {
 
   const handleSave = async () => {
     if (!name.trim()) return;
+    if (imageUrl && !imageUrl.startsWith('http://') && !imageUrl.startsWith('https://') && !imageUrl.startsWith('file://')) {
+      toast('Image URL must start with http:// or https://', 'error');
+      return;
+    }
     setSaving(true);
     await onSave({ name: name.trim(), imageUrl });
     setSaving(false);

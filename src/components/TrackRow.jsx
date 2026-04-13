@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { usePlayerStore, useLibraryStore, useDownloadStore, useToastStore } from '../store';
+import { usePlayerStore, useLibraryStore, useDownloadStore, useToastStore, useSelectionStore } from '../store';
 import { PlayIcon, PauseIcon, HeartIcon, DownloadIcon, MoreIcon, MusicIcon, CheckIcon } from './Icons';
 
 function formatTime(ms) {
@@ -17,6 +17,8 @@ export default function TrackRow({ track, index, queue, showAlbum = true }) {
   const { liked, toggleLike } = useLibraryStore();
   const { downloadTrack, activeDownloads } = useDownloadStore();
   const { add: toast } = useToastStore();
+  const { selectionMode, toggleSelect } = useSelectionStore();
+  const isTrackSelected = useSelectionStore(s => s.selectedTracks.has(track.id));
   const [ctxPos, setCtxPos] = useState(null);
   const ctxRef = useRef(null);
 
@@ -27,7 +29,12 @@ export default function TrackRow({ track, index, queue, showAlbum = true }) {
   const isDownloading = dlState?.status === 'downloading';
   const isDone = track.downloaded || dlState?.status === 'done';
 
-  const handlePlay = () => {
+  const handlePlay = (e) => {
+    if (e && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      toggleSelect(track.id);
+      return;
+    }
     if (isCurrent) { playPause(); return; }
     playTrack(track, queue || [track]);
   };
@@ -60,10 +67,30 @@ export default function TrackRow({ track, index, queue, showAlbum = true }) {
   return (
     <>
       <div
-        className={`track-row ${isCurrent ? 'playing' : ''}`}
+        className={`track-row ${isCurrent ? 'playing' : ''}${isTrackSelected ? ' selected' : ''}`}
         onClick={handlePlay}
         onContextMenu={handleCtx}
+        draggable="true"
+        onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(index)); e.dataTransfer.effectAllowed = 'move'; }}
+        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+        onDrop={(e) => { e.preventDefault(); }}
+        role="row"
+        aria-selected={isTrackSelected}
+        aria-label={track.title}
       >
+        {/* Drag handle */}
+        <span className="drag-handle" title="Drag to reorder">&#8801;</span>
+
+        {/* Selection checkbox */}
+        <input
+          type="checkbox"
+          className="select-checkbox"
+          checked={isTrackSelected}
+          onChange={(e) => { e.stopPropagation(); toggleSelect(track.id); }}
+          onClick={(e) => e.stopPropagation()}
+          style={{ display: selectionMode ? 'inline-block' : undefined }}
+        />
+
         {/* Number / Now Playing indicator */}
         <div className="track-num">
           {isCurrent && playing ? (

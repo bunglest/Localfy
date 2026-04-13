@@ -12,9 +12,16 @@ export default function Downloads() {
   useEffect(() => {
     loadStats();
     checkYtDlp();
-    const interval = setInterval(() => loadStats(), 2000);
-    return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const hasActive = Object.keys(activeDownloads).some(
+      id => ['downloading', 'queued'].includes(activeDownloads[id]?.status)
+    );
+    const ms = hasActive ? 2000 : 10000;
+    const interval = setInterval(() => loadStats(), ms);
+    return () => clearInterval(interval);
+  }, [activeDownloads]);
 
   const checkYtDlp = async () => {
     const result = await window.localfy.downloadCheckYtDlp();
@@ -313,8 +320,8 @@ function QueueItem({ item, divider }) {
         )}
       </div>
 
-      {/* Status badge */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+      {/* Status badge + cancel */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
         <div style={{
           display: 'inline-flex', alignItems: 'center', gap: 5,
           color: statusColor(item.status),
@@ -326,6 +333,16 @@ function QueueItem({ item, divider }) {
           )}
           {statusLabel(item.status)}
         </div>
+        {(item.status === 'downloading' || item.status === 'queued') && (
+          <button
+            className="track-action-btn"
+            title="Cancel download"
+            onClick={() => window.localfy.downloadCancel(item.track_id)}
+            style={{ color: 'var(--red)', flexShrink: 0 }}
+          >
+            <XIcon size={14} />
+          </button>
+        )}
       </div>
     </div>
   );

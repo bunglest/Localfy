@@ -1,6 +1,8 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { usePlayerStore, useLibraryStore, useToastStore, seekingFlag } from '../store';
+import { usePlayerStore, useLibraryStore, useToastStore, useUIStore, seekingFlag } from '../store';
 import ArtistLinks from './ArtistLinks';
+import QueuePanel from './QueuePanel';
+import Equalizer from './Equalizer';
 import {
   PlayIcon, PauseIcon, SkipNextIcon, SkipPrevIcon,
   ShuffleIcon, RepeatIcon, VolumeIcon, HeartIcon, MusicIcon
@@ -89,6 +91,7 @@ export default function Player() {
 
   const { liked, toggleLike } = useLibraryStore();
   const { add: toast } = useToastStore();
+  const { showQueue, showEqualizer } = useUIStore();
 
   const [muted, setMuted]     = useState(false);
   const [prevVol, setPrevVol] = useState(0.8);
@@ -243,6 +246,28 @@ export default function Player() {
       {/* ── Right: Volume + Speed ─────────────────────────────────────── */}
       <div className="player-right" style={{ gap: 6 }}>
 
+        {/* Queue toggle */}
+        <button
+          className={`player-btn ${showQueue ? 'active' : ''}`}
+          onClick={() => useUIStore.getState().toggleQueue()}
+          title="Queue"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
+          </svg>
+        </button>
+
+        {/* Equalizer toggle */}
+        <button
+          className={`player-btn ${showEqualizer ? 'active' : ''}`}
+          onClick={() => useUIStore.getState().toggleEqualizer()}
+          title="Equalizer"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><circle cx="4" cy="12" r="2" /><circle cx="12" cy="10" r="2" /><circle cx="20" cy="14" r="2" />
+          </svg>
+        </button>
+
         {/* Speed control */}
         <div style={{ position: 'relative' }} ref={speedMenuRef}>
           <button
@@ -387,6 +412,9 @@ export default function Player() {
           {Math.round(displayVolume * 100)}%
         </span>
       </div>
+
+      {showQueue && <QueuePanel />}
+      {showEqualizer && <Equalizer />}
     </footer>
   );
 }

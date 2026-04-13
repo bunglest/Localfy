@@ -47,6 +47,11 @@ const api = {
   dbUpdatePlaylistImage: (playlistId, imagePath) => ipcRenderer.invoke('db:updatePlaylistImage', playlistId, imagePath),
   dbRenamePlaylist: (id, name) => ipcRenderer.invoke('db:renamePlaylist', id, name),
   dbRenameFolder: (id, name) => ipcRenderer.invoke('db:renameFolder', id, name),
+  dbRemoveTrackFromPlaylist: (playlistId, trackId) => ipcRenderer.invoke('db:removeTrackFromPlaylist', playlistId, trackId),
+  dbReorderPlaylistTrack: (playlistId, trackId, newPosition) => ipcRenderer.invoke('db:reorderPlaylistTrack', playlistId, trackId, newPosition),
+  dbFindDuplicates: () => ipcRenderer.invoke('db:findDuplicates'),
+  dbExport: () => ipcRenderer.invoke('db:export'),
+  dbImport: () => ipcRenderer.invoke('db:import'),
 
   // ─── Downloads ─────────────────────────────────────────────────────────────
   downloadTrack: (track) => ipcRenderer.invoke('download:track', track),
@@ -56,6 +61,7 @@ const api = {
   downloadClearQueue: () => ipcRenderer.invoke('download:clearQueue'),
   downloadCheckYtDlp: () => ipcRenderer.invoke('download:checkYtDlp'),
   downloadRetryFailed: () => ipcRenderer.invoke('download:retryFailed'),
+  downloadCancel: (trackId) => ipcRenderer.invoke('download:cancel', trackId),
   onDownloadProgress: (cb) => {
     const listener = (_, data) => cb(data);
     ipcRenderer.on('download:progress', listener);
@@ -82,9 +88,42 @@ const api = {
   // ─── Player (file path → local URL) ───────────────────────────────────────
   playerGetFileUrl: (filePath) => ipcRenderer.invoke('player:getFileUrl', filePath),
 
+  // ─── Playlist Export / Import ───────────────────────────────────────────────
+  playlistExport: (playlistId) => ipcRenderer.invoke('playlist:export', playlistId),
+  playlistImport: () => ipcRenderer.invoke('playlist:import'),
+
+  // ─── Network ──────────────────────────────────────────────────────────────
+  networkStatus: () => ipcRenderer.invoke('network:status'),
+  onOnlineChange: (cb) => {
+    const listener = (_, data) => cb(data);
+    ipcRenderer.on('online-status-changed', listener);
+    return () => ipcRenderer.removeListener('online-status-changed', listener);
+  },
+
+  // ─── Media Keys ───────────────────────────────────────────────────────────
+  onMediaPlayPause: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('media:playPause', listener);
+    return () => ipcRenderer.removeListener('media:playPause', listener);
+  },
+  onMediaNext: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('media:next', listener);
+    return () => ipcRenderer.removeListener('media:next', listener);
+  },
+  onMediaPrev: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('media:prev', listener);
+    return () => ipcRenderer.removeListener('media:prev', listener);
+  },
+
+  // ─── Cache ────────────────────────────────────────────────────────────────
+  cacheClear: () => ipcRenderer.invoke('cache:clear'),
+
   // ─── Window controls ───────────────────────────────────────────────────────
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   maximizeWindow: () => ipcRenderer.send('window:maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
 
   // ─── Discord RPC ───────────────────────────────────────────────────────────
   discordSetClientId: (id) => ipcRenderer.invoke('discord:setClientId', id),

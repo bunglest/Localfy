@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import Player from './components/Player';
@@ -15,11 +15,23 @@ import ArtistPage from './pages/Artist';
 import LoginPage from './pages/Login';
 import Stats from './pages/Stats';
 import Discover from './pages/Discover';
-import { useAuthStore, usePlayerStore, useLibraryStore, useDownloadStore, useToastStore, seekingFlag } from './store';
+import CommandPalette from './components/CommandPalette';
+import KeyboardShortcuts from './components/KeyboardShortcuts';
+import ScrollToTop from './components/ScrollToTop';
+import { useAuthStore, usePlayerStore, useLibraryStore, useDownloadStore, useToastStore, useUIStore, seekingFlag } from './store';
+
+function NavigationTracker() {
+  const location = useLocation();
+  useEffect(() => {
+    useUIStore.getState().pushNavigation(location.pathname);
+  }, [location.pathname]);
+  return null;
+}
 
 export default function App() {
   const audioRef = useRef(null);
   const { init, loggedIn, loading } = useAuthStore();
+  const showCommandPalette = useUIStore(s => s.showCommandPalette);
   const { setAudioEl, setProgress, setDuration, setPlaying, next, currentTrack } = usePlayerStore();
   const { refresh } = useLibraryStore();
   const { handleProgress, loadStats } = useDownloadStore();
@@ -126,11 +138,16 @@ export default function App() {
 
   return (
     <HashRouter>
+      <a href="#main-content" className="skip-to-content">Skip to content</a>
+      <KeyboardShortcuts />
+      <ScrollToTop />
+      <NavigationTracker />
+      {showCommandPalette && <CommandPalette />}
       <audio ref={audioRef} preload="auto" />
       <div className="app-shell">
         <Sidebar />
         <TopBar />
-        <main className="content">
+        <main className="content" id="main-content">
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/search" element={<Search />} />

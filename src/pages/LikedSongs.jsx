@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useLibraryStore, useDownloadStore, usePlayerStore, useToastStore } from '../store';
 import TrackRow from '../components/TrackRow';
+import { SkeletonRows } from '../components/SkeletonPage';
 import { HeartIcon, SearchIcon, ImportIcon, DownloadIcon } from '../components/Icons';
 
 export default function LikedSongs() {
@@ -9,12 +10,13 @@ export default function LikedSongs() {
   const { playTrack } = usePlayerStore();
   const { add: toast } = useToastStore();
   const [filter, setFilter] = useState('');
+  const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
 
   useEffect(() => {
-    loadLiked();
+    loadLiked().finally(() => setLoading(false));
 
     // Subscribe to import progress
     const unsub = window.localfy.onImportProgress((data) => {
@@ -28,7 +30,7 @@ export default function LikedSongs() {
         }
       }
     });
-    return unsub;
+    return () => typeof unsub === 'function' && unsub();
   }, []);
 
   const filtered = liked.filter(t => {
@@ -178,7 +180,9 @@ export default function LikedSongs() {
 
       {/* Track list */}
       <div style={{ padding: '8px 12px 40px' }}>
-        {liked.length === 0 ? (
+        {loading ? (
+          <SkeletonRows />
+        ) : liked.length === 0 ? (
           <div className="empty-state">
             <HeartIcon size={64} className="empty-state-icon" style={{ color: 'var(--pink)', opacity: 0.3 }} />
             <div className="empty-state-title">No liked songs yet</div>

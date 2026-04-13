@@ -1,10 +1,15 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, protocol } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, protocol, Tray, Menu, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const crypto = require('crypto');
 
 const isDev = process.env.NODE_ENV === 'development';
+
+let tray = null;
+let isQuitting = false;
+const apiCache = new Map();
+const activeProcs = new Map(); // trackId -> ChildProcess
 
 // ─── Single-instance lock + deep-link handler ─────────────────────────────────
 // Must happen BEFORE app.whenReady so the second-instance event fires early.
@@ -66,7 +71,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false,        // allows file:// URLs in renderer
+      webSecurity: true,
       allowRunningInsecureContent: false,
     },
   });
@@ -77,16 +82,49 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
+  // Minimize to tray instead of quitting when close button is clicked
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
+
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 app.whenReady().then(() => {
   registerProtocol();
   createWindow();
+
+  // ─── System Tray ────────────────────────────────────────────────────────────
+  const trayIconPath = path.join(__dirname, '../public/icon.ico');
+  const trayIcon = nativeImage.createFromPath(trayIconPath);
+  tray = new Tray(trayIcon);
+  tray.setToolTip('Localfy');
+  const trayMenu = Menu.buildFromTemplate([
+    { label: 'Show/Hide Window', click: () => { if (mainWindow) { mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show(); } } },
+    { type: 'separator' },
+    { label: 'Play/Pause', click: () => { mainWindow?.webContents.send('media:playPause'); } },
+    { label: 'Next', click: () => { mainWindow?.webContents.send('media:next'); } },
+    { label: 'Previous', click: () => { mainWindow?.webContents.send('media:prev'); } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+  ]);
+  tray.setContextMenu(trayMenu);
+  tray.on('double-click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
+
+  // ─── Media Key Support ──────────────────────────────────────────────────────
+  globalShortcut.register('MediaPlayPause', () => { mainWindow?.webContents.send('media:playPause'); });
+  globalShortcut.register('MediaNextTrack', () => { mainWindow?.webContents.send('media:next'); });
+  globalShortcut.register('MediaPreviousTrack', () => { mainWindow?.webContents.send('media:prev'); });
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!mainWindow) createWindow(); });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); });
+
+ipcMain.handle('window:close', () => { isQuitting = true; app.quit(); });
 
 // ─── Settings helpers ─────────────────────────────────────────────────────────
 
@@ -124,9 +162,10 @@ function handleDeepLink(deepLinkUrl) {
   const state = parsed.searchParams.get('state');
   const error = parsed.searchParams.get('error');
 
-  if (!pendingOAuth) return;
-  const { resolve, reject, state: expectedState, verifier, clientId } = pendingOAuth;
+  const pending = pendingOAuth;
   pendingOAuth = null;
+  if (!pending) return;
+  const { resolve, reject, state: expectedState, verifier, clientId } = pending;
 
   if (error) {
     reject(new Error(`Spotify auth error: ${error}`));
@@ -237,6 +276,10 @@ ipcMain.handle('spotify:refreshToken', async () => {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
   });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Token refresh failed (${res.status}): ${txt}`);
+  }
   const data = await res.json();
   data.expires_at = Date.now() + data.expires_in * 1000;
   if (!data.refresh_token) data.refresh_token = tokens.refresh_token;
@@ -288,16 +331,33 @@ async function spotifyFetch(endpoint, options = {}) {
   return res.json();
 }
 
+// ─── Spotify API Caching ─────────────────────────────────────────────────────
+
+async function cachedSpotifyFetch(endpoint, ttlMs = 60000) {
+  const cached = apiCache.get(endpoint);
+  if (cached && (Date.now() - cached.timestamp) < ttlMs) {
+    return cached.data;
+  }
+  const data = await spotifyFetch(endpoint);
+  apiCache.set(endpoint, { data, timestamp: Date.now() });
+  return data;
+}
+
+ipcMain.handle('cache:clear', () => { apiCache.clear(); });
+
 // ─── Spotify Data Handlers ────────────────────────────────────────────────────
 
 ipcMain.handle('spotify:getMe', () => spotifyFetch('/me'));
 
 ipcMain.handle('spotify:getRecommendations', async () => {
   // /recommendations is deprecated for new apps — fall back to top tracks
+  let mediumItems = [];
   try {
     const top = await spotifyFetch('/me/top/tracks?limit=20&time_range=medium_term');
-    if (top.items?.length) return { tracks: top.items };
-    // If no medium-term data, try short-term
+    mediumItems = top.items || [];
+  } catch {}
+  if (mediumItems.length) return { tracks: mediumItems };
+  try {
     const short = await spotifyFetch('/me/top/tracks?limit=20&time_range=short_term');
     return { tracks: short.items || [] };
   } catch { return { tracks: [] }; }
@@ -341,17 +401,17 @@ ipcMain.handle('spotify:search', (_, q) =>
 // /browse/featured-playlists was removed from Spotify API in 2024 — use user's own playlists instead
 ipcMain.handle('spotify:getFeatured', async () => {
   try {
-    const data = await spotifyFetch('/me/playlists?limit=8');
+    const data = await cachedSpotifyFetch('/me/playlists?limit=8', 120000);
     // Return in the same shape the Home page expects: { playlists: { items: [...] } }
     return { playlists: { items: data.items || [] } };
   } catch (e) {
     return { playlists: { items: [] } };
   }
 });
-ipcMain.handle('spotify:getNewReleases', () => spotifyFetch('/browse/new-releases?limit=10'));
-ipcMain.handle('spotify:getCategories',  () => spotifyFetch('/browse/categories?limit=20'));
+ipcMain.handle('spotify:getNewReleases', () => cachedSpotifyFetch('/browse/new-releases?limit=10', 300000));
+ipcMain.handle('spotify:getCategories',  () => cachedSpotifyFetch('/browse/categories?limit=20', 300000));
 
-ipcMain.handle('spotify:getArtist', (_, id) => spotifyFetch(`/artists/${id}`));
+ipcMain.handle('spotify:getArtist', (_, id) => cachedSpotifyFetch(`/artists/${id}`, 300000));
 ipcMain.handle('spotify:getArtistTopTracks', (_, id) =>
   spotifyFetch(`/artists/${id}/top-tracks?market=from_token`)
 );
@@ -364,7 +424,7 @@ ipcMain.handle('spotify:getAlbumTracks', (_, id) =>
 // /artists/{id}/related-artists was removed from Spotify API in 2024 — return empty gracefully
 ipcMain.handle('spotify:getRelatedArtists', async (_, id) => {
   try {
-    return await spotifyFetch(`/artists/${id}/related-artists`);
+    return await cachedSpotifyFetch(`/artists/${id}/related-artists`, 300000);
   } catch (e) {
     return { artists: [] };
   }
@@ -429,6 +489,71 @@ ipcMain.handle('db:getAllSpotifyIds',    () => db.getAllSpotifyIds());
 ipcMain.handle('db:updatePlaylistImage', (_, playlistId, imagePath) => db.updatePlaylistImage(playlistId, imagePath));
 ipcMain.handle('db:renamePlaylist',      (_, id, name) => db.renamePlaylist(id, name));
 ipcMain.handle('db:renameFolder',        (_, id, name) => db.renameFolder(id, name));
+
+ipcMain.handle('db:removeTrackFromPlaylist', (_, playlistId, trackId) => db.removeTrackFromPlaylist(playlistId, trackId));
+ipcMain.handle('db:reorderPlaylistTrack', (_, playlistId, trackId, newPosition) => db.reorderPlaylistTrack(playlistId, trackId, newPosition));
+ipcMain.handle('db:findDuplicates', () => db.findDuplicates());
+
+// ─── Backup / Restore ────────────────────────────────────────────────────────
+
+ipcMain.handle('db:export', async () => {
+  const data = db.exportAll();
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Database Backup',
+    defaultPath: 'localfy-backup.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  fs.writeFileSync(result.filePath, data, 'utf8');
+  return result.filePath;
+});
+
+ipcMain.handle('db:import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Database Backup',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const data = fs.readFileSync(result.filePaths[0], 'utf8');
+  db.importAll(data);
+  return { success: true };
+});
+
+// ─── Playlist Export / Import ────────────────────────────────────────────────
+
+ipcMain.handle('playlist:export', async (_, playlistId) => {
+  const data = db.exportPlaylist(playlistId);
+  if (!data) return null;
+  const parsed = JSON.parse(data);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Playlist',
+    defaultPath: `${(parsed.playlist.name || 'playlist').replace(/[<>:"/\\|?*]/g, '_')}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  fs.writeFileSync(result.filePath, data, 'utf8');
+  return result.filePath;
+});
+
+ipcMain.handle('playlist:import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Playlist',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const data = fs.readFileSync(result.filePaths[0], 'utf8');
+  const playlistId = db.importPlaylistFromJson(data);
+  return { success: true, playlistId };
+});
+
+// ─── Offline Detection ───────────────────────────────────────────────────────
+
+ipcMain.handle('network:status', () => {
+  const dns = require('dns');
+  return dns.promises.lookup('api.spotify.com').then(() => true).catch(() => false);
+});
 
 ipcMain.handle('settings:chooseImage', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -516,7 +641,6 @@ function getDownloadPath() {
 }
 
 function findYtDlp() {
-  const { execSync } = require('child_process');
   const candidates = [
     'yt-dlp',
     'yt-dlp.exe',
@@ -537,6 +661,22 @@ ipcMain.handle('download:checkYtDlp', () => {
 
 async function downloadSingleTrack(track) {
   return new Promise((resolve) => {
+    const downloadDir = getDownloadPath();
+
+    // ── Disk space check ────────────────────────────────────────────────────
+    try {
+      const stat = fs.statfsSync(downloadDir);
+      const freeBytes = stat.bfree * stat.bsize;
+      if (freeBytes < 100 * 1024 * 1024) {
+        mainWindow?.webContents.send('download:progress', {
+          trackId: track.id, status: 'failed', progress: 0,
+          title: track.title, artist: track.artist, error: 'Low disk space',
+        });
+        resolve({ success: false, error: 'Low disk space' });
+        return;
+      }
+    } catch {}
+
     const ytDlp = findYtDlp();
     if (!ytDlp) {
       mainWindow?.webContents.send('download:progress', {
@@ -547,14 +687,22 @@ async function downloadSingleTrack(track) {
       return;
     }
 
-    const downloadDir = getDownloadPath();
-    const safeName    = `${track.artist} - ${track.title}`
+    // ── Custom filename pattern ─────────────────────────────────────────────
+    const filenamePattern = getSetting('download.filenamePattern', '{artist} - {title}');
+    const safeName = filenamePattern
+      .replace(/\{artist\}/g, track.artist || '')
+      .replace(/\{title\}/g, track.title || '')
+      .replace(/\{album\}/g, track.album || '')
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').substring(0, 100);
+
+    // ── Audio format selection ──────────────────────────────────────────────
+    const audioFormat = getSetting('audio.format', 'mp3');
+    const audioQuality = getSetting('audio.quality', '0');
     const outTemplate = path.join(downloadDir, `${safeName}.%(ext)s`);
 
     const args = [
       `ytsearch1:${track.artist} ${track.title} audio`,
-      '-x', '--audio-format', 'mp3', '--audio-quality', '0',
+      '-x', '--audio-format', audioFormat, '--audio-quality', audioQuality,
       '-o', outTemplate,
       '--no-playlist', '--socket-timeout', '30', '--retries', '3', '--no-part',
     ];
@@ -566,6 +714,9 @@ async function downloadSingleTrack(track) {
 
     const proc = spawn(ytDlp, args, { windowsHide: true });
 
+    // Track active process for cancellation support
+    activeProcs.set(track.id, proc);
+
     proc.stdout.on('data', (chunk) => {
       const pct = chunk.toString().match(/(\d+\.?\d*)%/);
       if (pct) {
@@ -576,9 +727,13 @@ async function downloadSingleTrack(track) {
       }
     });
 
-    proc.stderr.on('data', () => {});
+    // ── Collect stderr for failure logging ──────────────────────────────────
+    const stderrChunks = [];
+    proc.stderr.on('data', (chunk) => { stderrChunks.push(chunk.toString()); });
 
     proc.on('close', (code) => {
+      activeProcs.delete(track.id);
+
       if (code === 0) {
         let foundPath = null;
         try {
@@ -589,7 +744,7 @@ async function downloadSingleTrack(track) {
             /\.(mp3|m4a|opus|webm)$/.test(f)
           );
           if (match) foundPath = path.join(downloadDir, match);
-          const exact = path.join(downloadDir, `${safeName}.mp3`);
+          const exact = path.join(downloadDir, `${safeName}.${audioFormat}`);
           if (!foundPath && fs.existsSync(exact)) foundPath = exact;
         } catch {}
 
@@ -608,15 +763,18 @@ async function downloadSingleTrack(track) {
           resolve({ success: false, error: 'File not found after download' });
         }
       } else {
+        const stderrOutput = stderrChunks.join('').substring(0, 500);
+        const errorMsg = `Exit code ${code}${stderrOutput ? ': ' + stderrOutput : ''}`;
         mainWindow?.webContents.send('download:progress', {
           trackId: track.id, status: 'failed', progress: 0,
-          title: track.title, artist: track.artist, error: `Exit code ${code}`,
+          title: track.title, artist: track.artist, error: errorMsg,
         });
-        resolve({ success: false, error: `yt-dlp exit code ${code}` });
+        resolve({ success: false, error: `yt-dlp exit code ${code}${stderrOutput ? ': ' + stderrOutput : ''}` });
       }
     });
 
     proc.on('error', (err) => {
+      activeProcs.delete(track.id);
       mainWindow?.webContents.send('download:progress', {
         trackId: track.id, status: 'failed', progress: 0,
         title: track.title, artist: track.artist, error: err.message,
@@ -655,6 +813,16 @@ ipcMain.handle('download:all', async (_, tracks) => {
 ipcMain.handle('download:getStats',   ()  => db.getQueueStats());
 ipcMain.handle('download:getQueue',   ()  => db.getQueueItems());
 ipcMain.handle('download:clearQueue', ()  => { downloadQueue = []; db.clearQueue(); });
+
+ipcMain.handle('download:cancel', (_, trackId) => {
+  const proc = activeProcs.get(trackId);
+  if (proc) {
+    proc.kill();
+    activeProcs.delete(trackId);
+  }
+  downloadQueue = downloadQueue.filter(t => t.id !== trackId);
+  return { cancelled: true };
+});
 
 ipcMain.handle('download:retryFailed', async () => {
   const failed = db.getQueueItems().filter(i => i.status === 'failed');

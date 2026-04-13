@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { usePlayerStore, useDownloadStore, useToastStore, useLibraryStore } from '../store';
+import { SkeletonGrid } from '../components/SkeletonPage';
 
 function fmtMs(ms) {
   if (!ms) return '--:--';
@@ -62,7 +63,7 @@ export default function Discover() {
     playTrack(mapped[0], mapped);
   };
 
-  if (loading) return <div className="page-loading"><div className="spinner" /></div>;
+  if (loading) return <div style={{ padding: '28px 32px 48px' }}><SkeletonGrid /></div>;
 
   return (
     <div style={{ padding: '28px 32px 48px' }}>

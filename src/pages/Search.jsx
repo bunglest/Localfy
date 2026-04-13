@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ArtistLinks from '../components/ArtistLinks';
-import { usePlayerStore, useDownloadStore, useToastStore } from '../store';
+import { usePlayerStore, useDownloadStore, useToastStore, useSearchStore } from '../store';
 import { SearchIcon, PlayIcon, DownloadIcon } from '../components/Icons';
 
 function formatTime(ms) {
@@ -28,11 +28,13 @@ export default function Search() {
   const { playTrack }    = usePlayerStore();
   const { downloadTrack } = useDownloadStore();
   const { add: toast }   = useToastStore();
+  const { addSearch }    = useSearchStore();
 
   // Pick up ?q= from topbar search
   useEffect(() => {
     const q = new URLSearchParams(location.search).get('q');
     if (q) { setQuery(q); doSearch(q); }
+    else { setQuery(''); setResults(null); }
     inputRef.current?.focus();
   }, [location.search]);
 
@@ -51,7 +53,7 @@ export default function Search() {
     }
   };
 
-  const handleSubmit = (e) => { e.preventDefault(); doSearch(query); };
+  const handleSubmit = (e) => { e.preventDefault(); addSearch(query); doSearch(query); };
 
   const handlePlay = (track, allTracks) => {
     playTrack(mapSpotifyTrack(track), allTracks.map(mapSpotifyTrack));
@@ -306,7 +308,10 @@ function SearchTrackRow({ track, index, onPlay, onDownload }) {
         }
       </div>
       <div className="track-info">
-        <img src={track.album?.images?.[0]?.url} alt="" className="track-art" style={{ background: 'var(--surface-2)' }} />
+        {track.album?.images?.[0]?.url
+          ? <img src={track.album.images[0].url} alt="" className="track-art" style={{ background: 'var(--surface-2)' }} />
+          : <div className="track-art" style={{ background: 'var(--surface-2)' }} />
+        }
         <div className="track-text">
           <div className="track-title">{track.name}</div>
           <div className="track-artist">

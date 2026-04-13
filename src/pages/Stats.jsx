@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import ArtistLinks from '../components/ArtistLinks';
 import { usePlayerStore, useToastStore } from '../store';
+import { SkeletonRows } from '../components/SkeletonPage';
 
 function fmtMs(ms) {
   if (!ms) return '0m';
@@ -39,7 +40,7 @@ export default function Stats() {
       .catch(() => { toast('Failed to load stats', 'error'); setLoading(false); });
   }, []);
 
-  if (loading) return <div className="page-loading"><div className="spinner" /></div>;
+  if (loading) return <div style={{ padding: '28px 32px 48px' }}><SkeletonRows /></div>;
 
   if (!data || data.totalPlays === 0) {
     return (
