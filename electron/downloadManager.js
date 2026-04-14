@@ -1,10 +1,13 @@
 const fs = require('fs');
+const https = require('https');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 
 const AUDIO_EXTENSIONS = /\.(mp3|m4a|opus|ogg|webm)$/i;
 const MAX_AUTO_RETRIES = 2;
 const RETRY_DELAYS_MS = [1500, 4000];
+const YT_DLP_DOWNLOAD_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
+const HTTP_REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -43,6 +46,8 @@ class DownloadManager {
     this.getMainWindow = getMainWindow;
     this.processing = false;
     this.currentRun = null;
+    this.ytDlpInstallPromise = null;
+    this.lastYtDlpBootstrapError = null;
   }
 
   init() {
@@ -145,8 +150,30 @@ class DownloadManager {
     }
   }
 
+  getBundledYtDlpPath() {
+    if (!this.app.isPackaged || !process.resourcesPath) return null;
+    return path.join(
+      process.resourcesPath,
+      'bin',
+      'yt-dlp',
+      process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
+    );
+  }
+
+  getManagedYtDlpPath() {
+    const binDir = path.join(this.app.getPath('userData'), 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    return path.join(binDir, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+  }
+
+  canAutoInstallYtDlp() {
+    return process.platform === 'win32';
+  }
+
   findYtDlp() {
     const candidates = [
+      this.getBundledYtDlpPath(),
+      this.getManagedYtDlpPath(),
       'yt-dlp',
       'yt-dlp.exe',
       path.join(this.app.getPath('userData'), 'yt-dlp.exe'),
@@ -156,6 +183,97 @@ class DownloadManager {
       if (this.canExecuteBinary(candidate)) return candidate;
     }
     return null;
+  }
+
+  downloadFile(url, destinationPath, redirectCount = 0) {
+    return new Promise((resolve, reject) => {
+      if (redirectCount > 5) {
+        reject(new Error('Too many redirects while downloading yt-dlp'));
+        return;
+      }
+
+      const tempPath = `${destinationPath}.download`;
+      try { fs.rmSync(tempPath, { force: true }); } catch {}
+
+      const request = https.get(url, {
+        headers: {
+          'user-agent': `Localfy/${this.app.getVersion?.() || 'dev'}`,
+        },
+      }, (response) => {
+        if (HTTP_REDIRECT_CODES.has(response.statusCode) && response.headers.location) {
+          response.resume();
+          const nextUrl = new URL(response.headers.location, url).toString();
+          this.downloadFile(nextUrl, destinationPath, redirectCount + 1).then(resolve, reject);
+          return;
+        }
+
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`Failed to download yt-dlp (${response.statusCode || 'unknown status'})`));
+          return;
+        }
+
+        const file = fs.createWriteStream(tempPath);
+        response.pipe(file);
+
+        file.on('finish', () => {
+          file.close(() => {
+            try {
+              fs.renameSync(tempPath, destinationPath);
+              resolve(destinationPath);
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
+
+        file.on('error', (error) => {
+          try { file.close(() => {}); } catch {}
+          try { fs.rmSync(tempPath, { force: true }); } catch {}
+          reject(error);
+        });
+      });
+
+      request.on('error', (error) => {
+        try { fs.rmSync(tempPath, { force: true }); } catch {}
+        reject(error);
+      });
+
+      request.setTimeout(30000, () => {
+        request.destroy(new Error('Timed out while downloading yt-dlp'));
+      });
+    });
+  }
+
+  async ensureYtDlp() {
+    const existing = this.findYtDlp();
+    if (existing) {
+      this.lastYtDlpBootstrapError = null;
+      return existing;
+    }
+
+    if (!this.canAutoInstallYtDlp()) return null;
+    if (this.ytDlpInstallPromise) return this.ytDlpInstallPromise;
+
+    const targetPath = this.getManagedYtDlpPath();
+    this.ytDlpInstallPromise = (async () => {
+      try {
+        await this.downloadFile(YT_DLP_DOWNLOAD_URL, targetPath);
+        if (!this.canExecuteBinary(targetPath)) {
+          throw new Error('yt-dlp was downloaded but could not be executed');
+        }
+        this.lastYtDlpBootstrapError = null;
+        return targetPath;
+      } catch (error) {
+        this.lastYtDlpBootstrapError = error.message;
+        try { fs.rmSync(targetPath, { force: true }); } catch {}
+        return null;
+      } finally {
+        this.ytDlpInstallPromise = null;
+      }
+    })();
+
+    return this.ytDlpInstallPromise;
   }
 
   getJsRuntimePath() {
@@ -233,6 +351,9 @@ class DownloadManager {
     return {
       available: !!ytDlp,
       path: ytDlp,
+      autoInstallSupported: this.canAutoInstallYtDlp(),
+      managedPath: this.canAutoInstallYtDlp() ? this.getManagedYtDlpPath() : null,
+      lastBootstrapError: this.lastYtDlpBootstrapError,
       ffmpegAvailable: ffmpeg.available,
       ffmpegPath: ffmpeg.ffmpegPath,
       ffprobePath: ffmpeg.ffprobePath,
@@ -367,6 +488,17 @@ class DownloadManager {
       effectiveFormat: 'm4a',
       note: null,
     };
+  }
+
+  buildProcessEnv(extraPathEntries = []) {
+    const env = { ...process.env };
+    const pathKey = Object.keys(env).find(key => /^path$/i.test(key)) || 'PATH';
+    const currentPath = env[pathKey] || env.PATH || env.Path || '';
+    for (const key of Object.keys(env)) {
+      if (/^path$/i.test(key) && key !== pathKey) delete env[key];
+    }
+    env[pathKey] = [...extraPathEntries, currentPath].filter(Boolean).join(path.delimiter);
+    return env;
   }
 
   checkDiskSpace(downloadDir) {
@@ -661,8 +793,20 @@ class DownloadManager {
     const spaceError = this.checkDiskSpace(downloadDir);
     if (spaceError) return { success: false, error: spaceError };
 
-    const ytDlp = this.findYtDlp();
-    if (!ytDlp) return { success: false, error: 'yt-dlp not found' };
+    const existingYtDlp = this.findYtDlp();
+    if (!existingYtDlp && this.canAutoInstallYtDlp()) {
+      this.logJob(job.id, 'yt-dlp not found locally, downloading managed copy...');
+    }
+
+    const ytDlp = await this.ensureYtDlp();
+    if (!ytDlp) {
+      return {
+        success: false,
+        error: this.lastYtDlpBootstrapError
+          ? `yt-dlp not available: ${this.lastYtDlpBootstrapError}`
+          : 'yt-dlp not found',
+      };
+    }
     const ffmpeg = this.findFfmpegSuite();
 
     this.cleanupTempDir(tempDir);
@@ -688,10 +832,7 @@ class DownloadManager {
     if (plan.note) this.logJob(job.id, plan.note);
 
     return new Promise((resolve) => {
-      const env = { ...process.env };
-      if (ffmpeg.pathEntries.length > 0) {
-        env.PATH = [...ffmpeg.pathEntries, env.PATH].filter(Boolean).join(path.delimiter);
-      }
+      const env = this.buildProcessEnv(ffmpeg.pathEntries);
       if (this.getJsRuntimeArg()) {
         env.ELECTRON_RUN_AS_NODE = '1';
       }

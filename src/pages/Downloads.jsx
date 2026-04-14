@@ -76,23 +76,33 @@ export default function Downloads() {
       {toolStatus?.available === false && (
         <div style={{
           padding: '14px 18px', marginBottom: 24,
-          background: 'rgba(255,71,87,0.08)', border: '1px solid rgba(255,71,87,0.25)',
+          background: toolStatus.autoInstallSupported ? 'rgba(255,179,71,0.08)' : 'rgba(255,71,87,0.08)',
+          border: toolStatus.autoInstallSupported ? '1px solid rgba(255,179,71,0.25)' : '1px solid rgba(255,71,87,0.25)',
           borderRadius: 'var(--radius)', display: 'flex', alignItems: 'flex-start', gap: 12,
         }}>
-          <AlertIcon size={18} style={{ color: 'var(--red)', flexShrink: 0, marginTop: 1 }} />
+          <AlertIcon size={18} style={{ color: toolStatus.autoInstallSupported ? 'var(--gold)' : 'var(--red)', flexShrink: 0, marginTop: 1 }} />
           <div>
-            <div style={{ fontWeight: 600, color: 'var(--red)', marginBottom: 4 }}>yt-dlp not found</div>
+            <div style={{ fontWeight: 600, color: toolStatus.autoInstallSupported ? 'var(--gold)' : 'var(--red)', marginBottom: 4 }}>
+              {toolStatus.autoInstallSupported ? 'yt-dlp will be installed automatically' : 'yt-dlp not found'}
+            </div>
             <div style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.6 }}>
-              Downloads require yt-dlp to be installed. Download it from{' '}
-              <span style={{ color: 'var(--pink)', cursor: 'pointer', textDecoration: 'underline' }}
-                onClick={() => window.localfy.openExternal('https://github.com/yt-dlp/yt-dlp/releases')}>
-                github.com/yt-dlp/yt-dlp/releases
-              </span>{' '}
-              and add it to your system PATH, then restart Localfy.
+              {toolStatus.autoInstallSupported
+                ? 'Localfy can fetch its own yt-dlp binary the first time you start a download. The first download may take a little longer while that tool is prepared.'
+                : <>
+                    Downloads require yt-dlp to be installed. Download it from{' '}
+                    <span style={{ color: 'var(--pink)', cursor: 'pointer', textDecoration: 'underline' }}
+                      onClick={() => window.localfy.openExternal('https://github.com/yt-dlp/yt-dlp/releases')}>
+                      github.com/yt-dlp/yt-dlp/releases
+                    </span>{' '}
+                    and add it to your system PATH, then restart Localfy.
+                  </>
+              }
             </div>
-            <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 12, background: 'var(--bg)', padding: '6px 10px', borderRadius: 6, color: 'var(--text-2)' }}>
-              winget install yt-dlp
-            </div>
+            {!toolStatus.autoInstallSupported && (
+              <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 12, background: 'var(--bg)', padding: '6px 10px', borderRadius: 6, color: 'var(--text-2)' }}>
+                winget install yt-dlp
+              </div>
+            )}
           </div>
         </div>
       )}

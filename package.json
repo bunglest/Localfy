@@ -1,13 +1,14 @@
 {
   "name": "localfy",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Your music, downloaded. A Spotify-powered desktop player.",
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "prepare:ytdlp": "node scripts/prepare-ytdlp.js",
     "build:react": "vite build",
-    "build": "vite build && electron-builder --win",
-    "build:dir": "vite build && electron-builder --win --dir",
+    "build": "npm run prepare:ytdlp && vite build && electron-builder --win",
+    "build:dir": "npm run prepare:ytdlp && vite build && electron-builder --win --dir",
     "preview": "vite preview"
   },
   "build": {
@@ -34,6 +35,10 @@
       }
     ],
     "extraResources": [
+      {
+        "from": "vendor/yt-dlp/yt-dlp.exe",
+        "to": "bin/yt-dlp/yt-dlp.exe"
+      },
       {
         "from": "node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe",
         "to": "bin/ffmpeg/ffmpeg.exe"
