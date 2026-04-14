@@ -34,6 +34,7 @@ export default function App() {
   const trackEndedNaturallyRef = useRef(false);
   const { init, loggedIn, loading } = useAuthStore();
   const showCommandPalette = useUIStore(s => s.showCommandPalette);
+  const sidebarCollapsed = useUIStore(s => s.sidebarCollapsed);
   const { setAudioEl, setProgress, setDuration, setPlaying, next, currentTrack } = usePlayerStore();
   const { refresh } = useLibraryStore();
   const { handleChanged, loadSnapshot } = useDownloadStore();
@@ -172,25 +173,31 @@ export default function App() {
       <NavigationTracker />
       {showCommandPalette && <CommandPalette />}
       <audio ref={audioRef} preload="auto" />
-      <div className="app-shell">
-        <Sidebar />
-        <TopBar />
-        <main className="content" id="main-content">
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/search" element={<Search />} />
-            <Route path="/library" element={<Library />} />
-            <Route path="/liked" element={<LikedSongs />} />
-            <Route path="/downloads" element={<Downloads />} />
-            <Route path="/discover" element={<Discover />} />
-            <Route path="/stats" element={<Stats />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/playlist/:id" element={<PlaylistPage />} />
-            <Route path="/artist/:id" element={<ArtistPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </main>
-        <Player />
+      <div className="app-stage">
+        <div className="app-stage-orb app-stage-orb-a" />
+        <div className="app-stage-orb app-stage-orb-b" />
+        <div className="app-frame">
+          <div className={`app-shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+            <Sidebar />
+            <TopBar />
+            <main className="content" id="main-content">
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/search" element={<Search />} />
+                <Route path="/library" element={<Library />} />
+                <Route path="/liked" element={<LikedSongs />} />
+                <Route path="/downloads" element={<Downloads />} />
+                <Route path="/discover" element={<Discover />} />
+                <Route path="/stats" element={<Stats />} />
+                <Route path="/settings" element={<Settings />} />
+                <Route path="/playlist/:id" element={<PlaylistPage />} />
+                <Route path="/artist/:id" element={<ArtistPage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </main>
+            <Player />
+          </div>
+        </div>
       </div>
       <Toast />
     </HashRouter>

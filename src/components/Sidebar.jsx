@@ -34,6 +34,7 @@ export default function Sidebar() {
   }
 
   const queueCount = stats.active || ((stats.queued || 0) + (stats.running || 0));
+  const completedCount = stats.completed || stats.done || 0;
 
   return (
     <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
@@ -68,16 +69,7 @@ export default function Sidebar() {
           <DownloadIcon size={17} />
           <span>Downloads</span>
           {queueCount > 0 && (
-            <span style={{
-              marginLeft: 'auto',
-              background: 'var(--pink)',
-              color: '#fff',
-              borderRadius: '999px',
-              padding: '1px 7px',
-              fontSize: '10px',
-              fontFamily: 'var(--font-mono)',
-              fontWeight: 700,
-            }}>
+            <span className="sidebar-nav-badge">
               {queueCount}
             </span>
           )}
@@ -92,6 +84,33 @@ export default function Sidebar() {
           <SettingsIcon size={17} /> Settings
         </NavLink>
       </nav>
+
+      {!sidebarCollapsed && (
+        <div className="sidebar-brief">
+          <div className="sidebar-brief-header">
+            <span className="sidebar-brief-kicker">Session</span>
+            <span className="sidebar-brief-live">Live</span>
+          </div>
+          <div className="sidebar-brief-grid">
+            <div className="sidebar-brief-card">
+              <span className="sidebar-brief-label">Queued</span>
+              <strong>{queueCount}</strong>
+            </div>
+            <div className="sidebar-brief-card">
+              <span className="sidebar-brief-label">Saved</span>
+              <strong>{completedCount}</strong>
+            </div>
+            <div className="sidebar-brief-card">
+              <span className="sidebar-brief-label">Lists</span>
+              <strong>{playlists.length}</strong>
+            </div>
+            <div className="sidebar-brief-card">
+              <span className="sidebar-brief-label">Folders</span>
+              <strong>{folders.length}</strong>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Playlists */}
       <div className="sidebar-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -148,15 +167,7 @@ export default function Sidebar() {
       <button
         onClick={toggleSidebar}
         title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        style={{
-          background: 'none', border: 'none', cursor: 'pointer',
-          color: 'var(--text-3)', padding: '10px 12px',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          transition: 'color 0.15s',
-          marginTop: 'auto', flexShrink: 0,
-        }}
-        onMouseEnter={e => e.currentTarget.style.color = 'var(--text-1)'}
-        onMouseLeave={e => e.currentTarget.style.color = 'var(--text-3)'}
+        className="sidebar-collapse-btn"
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
           style={{ transform: sidebarCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>

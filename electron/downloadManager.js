@@ -21,6 +21,20 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function normalizeMatchText(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .toLowerCase()
+    .trim();
+}
+
+function tokenizeMatchText(value) {
+  return normalizeMatchText(value).split(/\s+/).filter(Boolean);
+}
+
 function sanitizeFileStem(value) {
   return String(value || '')
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
@@ -452,6 +466,222 @@ class DownloadManager {
       : `yt-dlp exited with code ${code}`;
   }
 
+  buildSearchQueries(track) {
+    const artist = String(track?.artist || '').trim();
+    const title = String(track?.title || '').trim();
+    const album = String(track?.album || '').trim();
+    return unique([
+      [artist, title].filter(Boolean).join(' '),
+      [artist, title, 'official audio'].filter(Boolean).join(' '),
+      [title, artist].filter(Boolean).join(' '),
+      album ? [artist, title, album].filter(Boolean).join(' ') : null,
+    ]);
+  }
+
+  searchCandidates(ytDlp, track, env) {
+    const queries = this.buildSearchQueries(track);
+    const candidates = [];
+    const seenIds = new Set();
+
+    for (const query of queries) {
+      try {
+        const args = [
+          ...(this.getJsRuntimeArg() ? ['--js-runtimes', this.getJsRuntimeArg()] : []),
+          `ytsearch8:${query}`,
+          '--flat-playlist',
+          '--dump-single-json',
+          '--no-warnings',
+        ];
+        const output = execFileSync(ytDlp, args, {
+          env,
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 30000,
+          maxBuffer: 8 * 1024 * 1024,
+        });
+        const payload = JSON.parse(output);
+        for (const entry of payload.entries || []) {
+          if (!entry?.id || seenIds.has(entry.id)) continue;
+          seenIds.add(entry.id);
+          candidates.push(entry);
+        }
+      } catch {}
+
+      if (candidates.length >= 8) break;
+    }
+
+    return candidates;
+  }
+
+  scoreCandidate(track, candidate) {
+    const expectedTitle = normalizeMatchText(track?.title);
+    const expectedArtist = normalizeMatchText(track?.artist);
+    const expectedAlbum = normalizeMatchText(track?.album);
+    const title = normalizeMatchText(candidate?.title);
+    const channel = normalizeMatchText(candidate?.channel || candidate?.uploader);
+    const description = normalizeMatchText(candidate?.description);
+    const haystack = [title, channel, description].filter(Boolean).join(' ');
+    const expectedTitleTokens = new Set(tokenizeMatchText(track?.title));
+    const candidateTitleTokens = tokenizeMatchText(candidate?.title);
+    const candidateAllTokens = new Set(tokenizeMatchText(haystack));
+
+    let score = 0;
+    const reasons = [];
+
+    if (title && expectedTitle && title === expectedTitle) {
+      score += 70;
+      reasons.push('exact title');
+    } else if (title && expectedTitle && (title.includes(expectedTitle) || expectedTitle.includes(title))) {
+      score += 50;
+      reasons.push('title contains match');
+    }
+
+    const matchedTitleTokens = candidateTitleTokens.filter(token => expectedTitleTokens.has(token)).length;
+    if (candidateTitleTokens.length > 0 && expectedTitleTokens.size > 0) {
+      const overlapRatio = matchedTitleTokens / Math.max(expectedTitleTokens.size, candidateTitleTokens.length);
+      const overlapScore = Math.round(overlapRatio * 30);
+      score += overlapScore;
+      if (overlapScore > 0) reasons.push(`title overlap ${overlapScore}`);
+    }
+
+    if (expectedArtist) {
+      const artistTokens = tokenizeMatchText(track?.artist);
+      const artistMatches = artistTokens.filter(token => candidateAllTokens.has(token)).length;
+      if (artistMatches > 0) {
+        const artistScore = 12 + Math.round((artistMatches / Math.max(artistTokens.length, 1)) * 18);
+        score += artistScore;
+        reasons.push(`artist match ${artistScore}`);
+      }
+    }
+
+    if (candidate?.channel_is_verified) {
+      score += 10;
+      reasons.push('verified channel');
+    }
+
+    if (channel.includes('official') || channel.includes('topic') || channel.includes('vevo')) {
+      score += 10;
+      reasons.push('official channel');
+    }
+
+    if (description.includes('provided to youtube by')) {
+      score += 18;
+      reasons.push('official release audio');
+    }
+
+    if (expectedAlbum && haystack.includes(expectedAlbum)) {
+      score += 6;
+      reasons.push('album match');
+    }
+
+    const expectedDuration = Number(track?.duration_ms) > 0 ? Number(track.duration_ms) / 1000 : null;
+    const candidateDuration = Number(candidate?.duration) || null;
+    if (expectedDuration && candidateDuration) {
+      const delta = Math.abs(candidateDuration - expectedDuration);
+      if (delta <= 2) {
+        score += 28;
+        reasons.push('duration exact');
+      } else if (delta <= 5) {
+        score += 22;
+        reasons.push('duration close');
+      } else if (delta <= 10) {
+        score += 14;
+        reasons.push('duration near');
+      } else if (delta <= 20) {
+        score += 6;
+      } else if (delta > 45) {
+        score -= 18;
+        reasons.push('duration mismatch');
+      }
+    }
+
+    const discouragedTokens = {
+      parody: 50,
+      karaoke: 45,
+      instrumental: 42,
+      cover: 35,
+      reaction: 30,
+      tutorial: 30,
+      nightcore: 35,
+      remix: 18,
+      live: 16,
+      lyrics: 12,
+      slowed: 25,
+      reverb: 20,
+      sped: 18,
+      shorts: 25,
+      '8d': 25,
+    };
+
+    for (const [token, penalty] of Object.entries(discouragedTokens)) {
+      if (!candidateAllTokens.has(token)) continue;
+      if (expectedTitleTokens.has(token)) continue;
+      score -= penalty;
+      reasons.push(`unexpected ${token}`);
+    }
+
+    if (title.includes('first take') && !expectedTitle.includes('first take')) {
+      score -= 18;
+      reasons.push('unexpected first take');
+    }
+
+    return {
+      score,
+      reasons,
+    };
+  }
+
+  pickDownloadCandidate(track, candidates) {
+    const ranked = (candidates || [])
+      .map(candidate => {
+        const assessment = this.scoreCandidate(track, candidate);
+        return {
+          candidate,
+          score: assessment.score,
+          reasons: assessment.reasons,
+        };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    return {
+      best: ranked[0] || null,
+      ranked,
+    };
+  }
+
+  resolveDownloadTarget(ytDlp, track, env, jobId = null) {
+    const candidates = this.searchCandidates(ytDlp, track, env);
+    if (!candidates.length) {
+      return {
+        url: `ytsearch1:${[track?.artist, track?.title].filter(Boolean).join(' ')}`,
+        best: null,
+        ranked: [],
+      };
+    }
+
+    const selection = this.pickDownloadCandidate(track, candidates);
+    if (jobId) {
+      for (const item of selection.ranked.slice(0, 5)) {
+        this.logJob(
+          jobId,
+          `Candidate ${item.score}: ${item.candidate.title} | ${item.candidate.channel || item.candidate.uploader || 'unknown'} | ${item.candidate.duration || '?'}s | ${item.reasons.join(', ')}`
+        );
+      }
+      if (selection.best) {
+        this.logJob(
+          jobId,
+          `Selected source: ${selection.best.candidate.title} (${selection.best.candidate.url || selection.best.candidate.webpage_url})`
+        );
+      }
+    }
+
+    return {
+      url: selection.best?.candidate?.url || selection.best?.candidate?.webpage_url || `ytsearch1:${[track?.artist, track?.title].filter(Boolean).join(' ')}`,
+      best: selection.best,
+      ranked: selection.ranked,
+    };
+  }
+
   getAudioDownloadPlan(requestedFormat, audioQuality, ffmpeg) {
     const normalizedFormat = String(requestedFormat || 'mp3').toLowerCase();
     const nativeSelectors = {
@@ -816,9 +1046,13 @@ class DownloadManager {
     const audioQuality = String(this.db.getSetting('audio.quality', '0'));
     const plan = this.getAudioDownloadPlan(audioFormat, audioQuality, ffmpeg);
     const outTemplate = path.join(tempDir, 'source.%(ext)s');
-    const query = [track.artist, track.title, 'audio'].filter(Boolean).join(' ');
+    const env = this.buildProcessEnv(ffmpeg.pathEntries);
+    if (this.getJsRuntimeArg()) {
+      env.ELECTRON_RUN_AS_NODE = '1';
+    }
+    const target = this.resolveDownloadTarget(ytDlp, track, env, job.id);
     const args = [
-      `ytsearch1:${query}`,
+      target.url,
       ...(this.getJsRuntimeArg() ? ['--js-runtimes', this.getJsRuntimeArg()] : []),
       ...(ffmpeg.available && ffmpeg.locationArg ? ['--ffmpeg-location', ffmpeg.locationArg] : []),
       ...plan.args,
@@ -832,11 +1066,6 @@ class DownloadManager {
     if (plan.note) this.logJob(job.id, plan.note);
 
     return new Promise((resolve) => {
-      const env = this.buildProcessEnv(ffmpeg.pathEntries);
-      if (this.getJsRuntimeArg()) {
-        env.ELECTRON_RUN_AS_NODE = '1';
-      }
-
       const proc = spawn(ytDlp, args, {
         windowsHide: true,
         env,

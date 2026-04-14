@@ -27,15 +27,15 @@ function fmtMs(ms) {
 export default function Home() {
   const { user } = useAuthStore();
   const { playTrack } = usePlayerStore();
-  const { downloadTrack } = useDownloadStore();
+  const { downloadTrack, stats } = useDownloadStore();
   const { add: toast } = useToastStore();
   const navigate = useNavigate();
 
-  const [topTracks,    setTopTracks]    = useState([]);
+  const [topTracks, setTopTracks] = useState([]);
   const [recentTracks, setRecentTracks] = useState([]);
-  const [playlists,    setPlaylists]    = useState([]);
-  const [newReleases,  setNewReleases]  = useState([]);
-  const [loading,      setLoading]      = useState(true);
+  const [playlists, setPlaylists] = useState([]);
+  const [newReleases, setNewReleases] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
@@ -46,10 +46,10 @@ export default function Home() {
       window.localfy.spotifyGetNewReleases(),
     ]).then(([topR, recentR, featuredR, newR]) => {
       if (!alive) return;
-      if (topR.status      === 'fulfilled') setTopTracks(topR.value?.tracks?.slice(0, 20) || []);
-      if (recentR.status   === 'fulfilled') setRecentTracks(recentR.value?.tracks?.slice(0, 12) || []);
-      if (featuredR.status === 'fulfilled') setPlaylists(featuredR.value?.playlists?.items?.slice(0, 9) || []);
-      if (newR.status      === 'fulfilled') setNewReleases(newR.value?.albums?.items?.slice(0, 16) || []);
+      if (topR.status === 'fulfilled') setTopTracks(topR.value?.tracks?.slice(0, 20) || []);
+      if (recentR.status === 'fulfilled') setRecentTracks(recentR.value?.tracks?.slice(0, 12) || []);
+      if (featuredR.status === 'fulfilled') setPlaylists(featuredR.value?.playlists?.items?.slice(0, 8) || []);
+      if (newR.status === 'fulfilled') setNewReleases(newR.value?.albums?.items?.slice(0, 10) || []);
       setLoading(false);
     });
     return () => { alive = false; };
@@ -58,9 +58,26 @@ export default function Home() {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
   const name = user?.display_name?.split(' ')[0] || '';
-
   const heroTrack = recentTracks[0] || topTracks[0];
-  const heroArt   = heroTrack?.album?.images?.[0]?.url;
+  const queueCount = stats.active || ((stats.queued || 0) + (stats.running || 0));
+  const savedCount = stats.completed || stats.done || 0;
+  const trackedMinutes = Math.round((topTracks.slice(0, 8).reduce((sum, track) => sum + (track.duration_ms || 0), 0) || 0) / 60000);
+
+  const dashboardStats = [
+    { label: 'Top tracks', value: topTracks.length || '--', detail: 'ranked from Spotify signals' },
+    { label: 'Recent plays', value: recentTracks.length || '--', detail: 'ready to resume instantly' },
+    { label: 'Queued', value: queueCount, detail: 'downloads in flight' },
+    { label: 'Saved', value: savedCount, detail: 'available offline' },
+    { label: 'Tracked min', value: trackedMinutes || '--', detail: 'from current top rotation' },
+    { label: 'Playlists', value: playlists.length || '--', detail: 'featured for quick jumps' },
+  ];
+
+  const mixDeck = [
+    { title: 'Late Circuit', detail: 'Colder synth edges and motion-heavy hooks' },
+    { title: 'Sharp Focus', detail: 'Cleaner cuts for work, reading, and long sessions' },
+    { title: 'Afterglow', detail: 'Warmer choruses, softer pacing, less interruption' },
+    { title: 'Lift Off', detail: 'Higher tempo picks when the queue needs momentum' },
+  ];
 
   const handleDownload = async (e, track) => {
     e.stopPropagation();
@@ -73,43 +90,111 @@ export default function Home() {
   if (loading) return <SkeletonHome />;
 
   return (
-    <div className="home-page">
-
-      {/* ── Hero ─────────────────────────────────────────────────── */}
-      <div className="home-hero">
-        {heroArt && <img src={heroArt} alt="" className="home-hero-bg" />}
-        <div className="home-hero-overlay" />
-        <div className="home-hero-content">
-          <div className="home-greeting">{greeting}{name ? `, ${name}` : ''}.</div>
-          <div className="home-greeting-sub">
-            {topTracks.length > 0
-              ? `${topTracks.length} top tracks · ${recentTracks.length} recently played`
-              : 'Start listening to build your personalised feed'}
-          </div>
-          <div className="home-hero-actions">
+    <div className="home-page dashboard-home">
+      <section className="home-command-deck">
+        <div className="home-command-main">
+          <div className="home-command-kicker">Listening cockpit</div>
+          <h1 className="home-command-title">{greeting}{name ? `, ${name}` : ''}.</h1>
+          <p className="home-command-sub">
+            A calmer control surface for downloads, replay, and music discovery with less noise between decisions.
+          </p>
+          <div className="home-command-actions">
             {topTracks.length > 0 && (
               <button
                 className="btn btn-primary"
                 onClick={() => playTrack(toLocalfy(topTracks[0]), topTracks.map(toLocalfy))}
               >
-                <PlayIcon size={14} /> Play Top Tracks
+                <PlayIcon size={14} /> Start Top Rotation
               </button>
             )}
-            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/discover')}>
-              ✦ Discover New Music
+            <button className="btn btn-outline" onClick={() => navigate('/discover')}>
+              Open discovery stream
             </button>
           </div>
+
+          <div className="home-signal-grid">
+            {dashboardStats.map((item) => (
+              <div key={item.label} className="home-signal-card">
+                <span className="home-signal-label">{item.label}</span>
+                <strong>{item.value}</strong>
+                <small>{item.detail}</small>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
 
-      <div className="home-body">
-
-        {/* ── Continue Listening ───────────────────────────────────── */}
-        {recentTracks.length > 0 && (
-          <section className="home-section">
-            <div className="home-section-header">
-              <h2 className="home-section-title">Continue Listening</h2>
+        <div className="home-command-side">
+          {heroTrack ? (
+            <div className="home-spotlight" onClick={() => playTrack(toLocalfy(heroTrack), (recentTracks.length ? recentTracks : topTracks).map(toLocalfy))}>
+              <div className="home-spotlight-media">
+                {heroTrack.album?.images?.[0]?.url
+                  ? <img src={heroTrack.album.images[0].url} alt="" className="home-spotlight-art" />
+                  : <div className="home-spotlight-art home-spotlight-art-placeholder"><MusicIcon size={28} /></div>}
+                <button className="home-spotlight-play">
+                  <PlayIcon size={16} />
+                </button>
+              </div>
+              <div className="home-spotlight-copy">
+                <span className="home-spotlight-kicker">Spotlight</span>
+                <h2>{heroTrack.name}</h2>
+                <div className="home-spotlight-artist">
+                  <ArtistLinks
+                    artist={heroTrack.artists?.map(a => a.name).join(', ')}
+                    artistIds={heroTrack.artists?.map(a => a.id)}
+                  />
+                </div>
+                <div className="home-spotlight-meta">
+                  <span>{heroTrack.album?.name || 'Spotify'}</span>
+                  <span>{fmtMs(heroTrack.duration_ms)}</span>
+                </div>
+              </div>
             </div>
+          ) : (
+            <div className="home-spotlight home-spotlight-empty">
+              <MusicIcon size={30} />
+              <div>
+                <strong>No signal yet</strong>
+                <small>Start listening on Spotify to populate the deck.</small>
+              </div>
+            </div>
+          )}
+
+          {recentTracks.length > 0 && (
+            <div className="home-mini-list">
+              <div className="home-mini-list-header">
+                <span>Recent movement</span>
+                <button className="btn btn-ghost btn-sm" onClick={() => navigate('/liked')}>Liked songs</button>
+              </div>
+              {recentTracks.slice(0, 3).map((track) => (
+                <div
+                  key={track.id}
+                  className="home-mini-item"
+                  onClick={() => playTrack(toLocalfy(track), recentTracks.map(toLocalfy))}
+                >
+                  {track.album?.images?.[0]?.url
+                    ? <img src={track.album.images[0].url} alt="" className="home-mini-art" />
+                    : <div className="home-mini-art home-mini-art-placeholder"><MusicIcon size={14} /></div>}
+                  <div className="home-mini-copy">
+                    <strong>{track.name}</strong>
+                    <span>{track.artists?.map(a => a.name).join(', ')}</span>
+                  </div>
+                  <span className="home-mini-duration">{fmtMs(track.duration_ms)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="home-dashboard-grid">
+        <div className="home-panel home-panel-wide">
+          <div className="home-panel-header">
+            <div>
+              <h2 className="home-panel-title">Continue listening</h2>
+              <p className="home-panel-copy">The quickest re-entry points from your recent activity.</p>
+            </div>
+          </div>
+          {recentTracks.length > 0 ? (
             <HScrollRow>
               {recentTracks.map(track => (
                 <RecentCard
@@ -120,46 +205,49 @@ export default function Home() {
                 />
               ))}
             </HScrollRow>
-          </section>
-        )}
+          ) : (
+            <div className="home-empty-panel">No recent playback yet.</div>
+          )}
+        </div>
 
-        {/* ── Smart Mixes ──────────────────────────────────────────── */}
-        <section className="home-section">
-          <div className="home-section-header">
-            <h2 className="home-section-title">Smart Mixes</h2>
+        <div className="home-panel home-panel-compact">
+          <div className="home-panel-header">
+            <div>
+              <h2 className="home-panel-title">Mix presets</h2>
+              <p className="home-panel-copy">Directional moods for your next discovery run.</p>
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-            {[
-              { name: 'Chill Vibes',  gradient: 'linear-gradient(135deg, #667eea, #764ba2)' },
-              { name: 'High Energy',  gradient: 'linear-gradient(135deg, #f093fb, #f5576c)' },
-              { name: 'Feel Good',    gradient: 'linear-gradient(135deg, #4facfe, #00f2fe)' },
-              { name: 'Focus Flow',   gradient: 'linear-gradient(135deg, #43e97b, #38f9d7)' },
-            ].map(mix => (
-              <div
-                key={mix.name}
-                className="smart-mix-card"
-                style={{ background: mix.gradient }}
-                onClick={() => navigate('/discover')}
-              >
-                <div className="smart-mix-title">{mix.name}</div>
-                <div className="smart-mix-sub">Mix</div>
-              </div>
+          <div className="home-mix-list">
+            {mixDeck.map((mix, index) => (
+              <button key={mix.title} className="home-mix-item" onClick={() => navigate('/discover')}>
+                <span className="home-mix-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="home-mix-copy">
+                  <strong>{mix.title}</strong>
+                  <small>{mix.detail}</small>
+                </span>
+              </button>
             ))}
           </div>
-        </section>
+        </div>
+      </section>
 
-        {/* ── Top Tracks ───────────────────────────────────────────── */}
-        {topTracks.length > 0 && (
-          <section className="home-section">
-            <div className="home-section-header">
-              <h2 className="home-section-title">Your Top Tracks</h2>
+      <section className="home-analysis-grid">
+        <div className="home-panel">
+          <div className="home-panel-header">
+            <div>
+              <h2 className="home-panel-title">Top tracks</h2>
+              <p className="home-panel-copy">Your strongest signals in the current listening window.</p>
+            </div>
+            {topTracks.length > 0 && (
               <button
                 className="btn btn-ghost btn-sm"
                 onClick={() => playTrack(toLocalfy(topTracks[0]), topTracks.map(toLocalfy))}
               >
                 <PlayIcon size={12} /> Play all
               </button>
-            </div>
+            )}
+          </div>
+          {topTracks.length > 0 ? (
             <div className="top-tracks-grid">
               {topTracks.slice(0, 10).map((track, i) => (
                 <TopTrackRow
@@ -171,69 +259,65 @@ export default function Home() {
                 />
               ))}
             </div>
-          </section>
-        )}
+          ) : (
+            <div className="home-empty-panel">Top tracks will appear here after Spotify has enough recent activity.</div>
+          )}
+        </div>
 
-        {/* ── New Releases ─────────────────────────────────────────── */}
-        {newReleases.length > 0 && (
-          <section className="home-section">
-            <div className="home-section-header">
-              <h2 className="home-section-title">New Releases</h2>
+        <div className="home-panel">
+          <div className="home-panel-header">
+            <div>
+              <h2 className="home-panel-title">New releases</h2>
+              <p className="home-panel-copy">Fresh arrivals worth checking before they disappear into the feed.</p>
             </div>
-            <HScrollRow>
-              {newReleases.map(album => (
+          </div>
+          {newReleases.length > 0 ? (
+            <div className="home-release-grid">
+              {newReleases.slice(0, 6).map(album => (
                 <AlbumCard
                   key={album.id}
                   album={album}
                   onClick={() => window.localfy.openExternal(album.external_urls?.spotify || '')}
                 />
               ))}
-            </HScrollRow>
-          </section>
-        )}
+            </div>
+          ) : (
+            <div className="home-empty-panel">No fresh releases loaded.</div>
+          )}
+        </div>
+      </section>
 
-        {/* ── Your Playlists ───────────────────────────────────────── */}
-        {playlists.length > 0 && (
-          <section className="home-section">
-            <div className="home-section-header">
-              <h2 className="home-section-title">Your Playlists</h2>
-              <button className="btn btn-ghost btn-sm" onClick={() => navigate('/library')}>
-                Library →
-              </button>
-            </div>
-            <div className="playlists-grid">
-              {playlists.map(pl => (
-                <PlaylistTile
-                  key={pl.id}
-                  pl={pl}
-                  onClick={() => window.localfy.openExternal(pl.external_urls?.spotify || '')}
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {!loading && topTracks.length === 0 && recentTracks.length === 0 && (
-          <div className="home-empty">
-            <MusicIcon size={40} style={{ opacity: 0.3 }} />
-            <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-2)', marginTop: 16 }}>
-              Nothing here yet
-            </div>
-            <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 6, maxWidth: 280, textAlign: 'center' }}>
-              Start listening on Spotify, or{' '}
-              <span style={{ color: 'var(--pink)', cursor: 'pointer' }} onClick={() => navigate('/liked')}>
-                import your liked songs
-              </span>.
-            </div>
+      <section className="home-panel home-playlist-panel">
+        <div className="home-panel-header">
+          <div>
+            <h2 className="home-panel-title">Featured playlists</h2>
+            <p className="home-panel-copy">Direct paths into the sets Spotify is pushing right now.</p>
           </div>
-        )}
+          {playlists.length > 0 && (
+            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/library')}>
+              Library
+            </button>
+          )}
+        </div>
 
-      </div>
+        {playlists.length > 0 ? (
+          <div className="playlists-grid">
+            {playlists.map(pl => (
+              <PlaylistTile
+                key={pl.id}
+                pl={pl}
+                onClick={() => window.localfy.openExternal(pl.external_urls?.spotify || '')}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="home-empty-panel">Featured playlists will show up once Spotify responds.</div>
+        )}
+      </section>
     </div>
   );
 }
 
-/* ── Horizontal scroll wrapper ───────────────────────────────────── */
 function HScrollRow({ children }) {
   const ref = useRef(null);
   const onWheel = e => {
@@ -248,7 +332,6 @@ function HScrollRow({ children }) {
   );
 }
 
-/* ── Recently played card ────────────────────────────────────────── */
 function RecentCard({ track, onPlay, onDownload }) {
   const [hover, setHover] = useState(false);
   return (
@@ -285,7 +368,6 @@ function RecentCard({ track, onPlay, onDownload }) {
   );
 }
 
-/* ── Top track row ───────────────────────────────────────────────── */
 function TopTrackRow({ track, rank, onPlay, onDownload }) {
   const [hover, setHover] = useState(false);
   return (
@@ -323,7 +405,6 @@ function TopTrackRow({ track, rank, onPlay, onDownload }) {
   );
 }
 
-/* ── New release album card ──────────────────────────────────────── */
 function AlbumCard({ album, onClick }) {
   const [hover, setHover] = useState(false);
   return (
@@ -362,7 +443,6 @@ function AlbumCard({ album, onClick }) {
   );
 }
 
-/* ── Playlist tile ───────────────────────────────────────────────── */
 function PlaylistTile({ pl, onClick }) {
   const [hover, setHover] = useState(false);
   return (
@@ -395,33 +475,26 @@ function PlaylistTile({ pl, onClick }) {
   );
 }
 
-/* ── Skeleton ────────────────────────────────────────────────────── */
 function SkeletonHome() {
   return (
-    <div className="home-page">
-      <div className="home-hero home-hero-skeleton">
-        <div className="home-hero-overlay" />
-        <div className="home-hero-content">
-          <div className="skeleton" style={{ height: 44, width: 280, borderRadius: 8, marginBottom: 10 }} />
-          <div className="skeleton" style={{ height: 18, width: 200, borderRadius: 6, marginBottom: 20 }} />
-          <div style={{ display: 'flex', gap: 10 }}>
-            <div className="skeleton" style={{ height: 36, width: 150, borderRadius: 99 }} />
-            <div className="skeleton" style={{ height: 36, width: 170, borderRadius: 99 }} />
+    <div className="home-page dashboard-home">
+      <div className="home-command-deck home-command-deck-skeleton">
+        <div className="home-command-main">
+          <div className="skeleton" style={{ height: 14, width: 110, borderRadius: 999, marginBottom: 16 }} />
+          <div className="skeleton" style={{ height: 52, width: '62%', borderRadius: 18, marginBottom: 12 }} />
+          <div className="skeleton" style={{ height: 18, width: '55%', borderRadius: 8, marginBottom: 24 }} />
+          <div style={{ display: 'flex', gap: 10, marginBottom: 24 }}>
+            <div className="skeleton" style={{ height: 42, width: 170, borderRadius: 999 }} />
+            <div className="skeleton" style={{ height: 42, width: 150, borderRadius: 999 }} />
           </div>
-        </div>
-      </div>
-      <div className="home-body">
-        <div className="home-section">
-          <div className="skeleton" style={{ height: 22, width: 180, borderRadius: 6, marginBottom: 16 }} />
-          <div style={{ display: 'flex', gap: 12 }}>
+          <div className="home-signal-grid">
             {[...Array(6)].map((_, i) => (
-              <div key={i} style={{ flexShrink: 0, width: 140 }}>
-                <div className="skeleton" style={{ width: 140, height: 140, borderRadius: 10 }} />
-                <div className="skeleton" style={{ height: 14, width: '80%', borderRadius: 4, marginTop: 8 }} />
-                <div className="skeleton" style={{ height: 12, width: '60%', borderRadius: 4, marginTop: 5 }} />
-              </div>
+              <div key={i} className="skeleton" style={{ height: 110, borderRadius: 18 }} />
             ))}
           </div>
+        </div>
+        <div className="home-command-side">
+          <div className="skeleton" style={{ height: 290, borderRadius: 24 }} />
         </div>
       </div>
     </div>
