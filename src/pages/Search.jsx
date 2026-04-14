@@ -60,8 +60,10 @@ export default function Search() {
   };
 
   const handleDownload = async (track) => {
-    await downloadTrack(mapSpotifyTrack(track));
-    toast(`Queued: ${track.name}`, 'info');
+    const result = await downloadTrack(mapSpotifyTrack(track));
+    if (result?.alreadyDownloaded) toast('Already downloaded', 'info');
+    else if (result?.duplicate) toast(`Already queued: ${track.name}`, 'info');
+    else if (result?.queued) toast(`Queued: ${track.name}`, 'info');
   };
 
   const tracks    = results?.tracks?.items    || [];

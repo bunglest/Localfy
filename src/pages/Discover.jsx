@@ -149,9 +149,11 @@ export default function Discover() {
 
   const handleDownload = async (t) => {
     const mapped = mapTrack(t);
-    await downloadTrack(mapped);
+    const result = await downloadTrack(mapped);
     if (t._strategy) window.localfy.dbRecordRecFeedback(t.id, 'downloaded', t._strategy).catch(() => {});
-    toast(`Queued: ${t.name}`, 'info');
+    if (result?.alreadyDownloaded) toast('Already downloaded', 'info');
+    else if (result?.duplicate) toast(`Already queued: ${t.name}`, 'info');
+    else if (result?.queued) toast(`Queued: ${t.name}`, 'info');
   };
 
   const handlePlayAll = () => {

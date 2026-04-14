@@ -10,7 +10,7 @@ const { autoUpdater } = require('electron-updater');
 let tray = null;
 let isQuitting = false;
 const apiCache = new Map();
-const activeProcs = new Map(); // trackId -> ChildProcess
+const activeProcs = new Map(); // trackId -> { proc, queueItemId, cancelled, suppressEvents }
 
 // ─── Single-instance lock + deep-link handler ─────────────────────────────────
 // Must happen BEFORE app.whenReady so the second-instance event fires early.
@@ -518,6 +518,14 @@ ipcMain.handle('recommendations:get', async () => {
 
 ipcMain.handle('db:getDownloaded',      ()       => db.getAllDownloadedTracks());
 ipcMain.handle('db:getLiked',           ()       => db.getAllLikedTracks());
+ipcMain.handle('db:getTrack',           (_, query = {}) => {
+  if (query.id) {
+    const byId = db.getTrackById(query.id);
+    if (byId) return byId;
+  }
+  if (query.spotifyId) return db.getTrackBySpotifyId(query.spotifyId);
+  return null;
+});
 ipcMain.handle('db:getPlaylists',       ()       => db.getAllPlaylists());
 ipcMain.handle('db:getPlaylistTracks',  (_, id)  => db.getPlaylistTracks(id));
 ipcMain.handle('db:getFolders',         ()       => db.getAllFolders());
@@ -697,6 +705,7 @@ ipcMain.handle('import:playlists', async () => {
 
 let downloadQueue  = [];
 let isDownloading  = false;
+const AUDIO_EXTENSIONS = /\.(mp3|m4a|opus|ogg|webm)$/i;
 
 function getDownloadPath() {
   const custom = getSetting('downloadPath', '');
@@ -725,19 +734,108 @@ ipcMain.handle('download:checkYtDlp', () => {
   return { available: !!ytDlp, path: ytDlp };
 });
 
-async function downloadSingleTrack(track) {
+function emitDownloadProgress(job, status, progress = 0, extra = {}) {
+  if (job?.queueItemId) {
+    db.updateQueueItem(job.queueItemId, status, progress, extra.error);
+  }
+  mainWindow?.webContents.send('download:progress', {
+    queueItemId: job?.queueItemId || null,
+    trackId: job?.track?.id || extra.trackId,
+    status,
+    progress,
+    title: job?.track?.title || extra.title,
+    artist: job?.track?.artist || extra.artist,
+    ...extra,
+  });
+}
+
+function resolveStoredTrack(track) {
+  if (!track) return null;
+  if (track.id) {
+    const byId = db.getTrackById(track.id);
+    if (byId) return byId;
+  }
+  if (track.spotify_id) {
+    const bySpotifyId = db.getTrackBySpotifyId(track.spotify_id);
+    if (bySpotifyId) return bySpotifyId;
+  }
+  return null;
+}
+
+function isDownloadedLocally(track) {
+  return !!(track?.downloaded && track?.file_path && fs.existsSync(track.file_path));
+}
+
+function findDownloadedFile(downloadDir, safeName, audioFormat, existingFiles) {
+  const exact = path.join(downloadDir, `${safeName}.${audioFormat}`);
+  if (fs.existsSync(exact)) return exact;
+
+  const files = fs.readdirSync(downloadDir).filter(f => AUDIO_EXTENSIONS.test(f));
+  const lowerSafeName = safeName.toLowerCase();
+  const preferred = files.filter(file => {
+    const lowerFile = file.toLowerCase();
+    return !existingFiles.has(file) || lowerFile.startsWith(lowerSafeName);
+  });
+
+  preferred.sort((a, b) => {
+    try {
+      return fs.statSync(path.join(downloadDir, b)).mtimeMs - fs.statSync(path.join(downloadDir, a)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+
+  const exactNameMatch = preferred.find(file => path.parse(file).name.toLowerCase() === lowerSafeName);
+  if (exactNameMatch) return path.join(downloadDir, exactNameMatch);
+  if (preferred[0]) return path.join(downloadDir, preferred[0]);
+
+  const legacyBase = safeName.substring(0, 40).toLowerCase();
+  const fallback = files.find(file => file.toLowerCase().startsWith(legacyBase));
+  return fallback ? path.join(downloadDir, fallback) : null;
+}
+
+function enqueueTrackDownload(track) {
+  const saved = resolveStoredTrack(track) || db.upsertTrack(track);
+  if (isDownloadedLocally(saved)) {
+    return { queued: false, alreadyDownloaded: true, track: saved, filePath: saved.file_path };
+  }
+
+  const existingQueueItem = db.getQueueItems().find(item =>
+    item.track_id === saved.id && (item.status === 'queued' || item.status === 'downloading')
+  );
+  if (existingQueueItem) {
+    return {
+      queued: false,
+      duplicate: true,
+      queueItemId: existingQueueItem.id,
+      existingStatus: existingQueueItem.status,
+      track: saved,
+    };
+  }
+
+  const queueItem = db.addToQueue(saved.id);
+  const job = { track: saved, queueItemId: queueItem.id };
+  downloadQueue.push(job);
+  emitDownloadProgress(job, 'queued', 0);
+  processDownloadQueue();
+  return { queued: true, queueItemId: queueItem.id, track: saved };
+}
+
+async function downloadSingleTrack(job) {
   return new Promise((resolve) => {
+    const track = job.track;
     const downloadDir = getDownloadPath();
+    let existingFiles = new Set();
+    try {
+      existingFiles = new Set(fs.readdirSync(downloadDir));
+    } catch {}
 
     // ── Disk space check ────────────────────────────────────────────────────
     try {
       const stat = fs.statfsSync(downloadDir);
       const freeBytes = stat.bfree * stat.bsize;
       if (freeBytes < 100 * 1024 * 1024) {
-        mainWindow?.webContents.send('download:progress', {
-          trackId: track.id, status: 'failed', progress: 0,
-          title: track.title, artist: track.artist, error: 'Low disk space',
-        });
+        emitDownloadProgress(job, 'failed', 0, { error: 'Low disk space' });
         resolve({ success: false, error: 'Low disk space' });
         return;
       }
@@ -745,10 +843,7 @@ async function downloadSingleTrack(track) {
 
     const ytDlp = findYtDlp();
     if (!ytDlp) {
-      mainWindow?.webContents.send('download:progress', {
-        trackId: track.id, status: 'failed', progress: 0,
-        title: track.title, artist: track.artist, error: 'yt-dlp not found',
-      });
+      emitDownloadProgress(job, 'failed', 0, { error: 'yt-dlp not found' });
       resolve({ success: false, error: 'yt-dlp not found' });
       return;
     }
@@ -762,8 +857,8 @@ async function downloadSingleTrack(track) {
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').substring(0, 100);
 
     // ── Audio format selection ──────────────────────────────────────────────
-    const audioFormat = getSetting('audio.format', 'mp3');
-    const audioQuality = getSetting('audio.quality', '0');
+    const audioFormat = String(getSetting('audio.format', 'mp3'));
+    const audioQuality = String(getSetting('audio.quality', '0'));
     const outTemplate = path.join(downloadDir, `${safeName}.%(ext)s`);
 
     const args = [
@@ -773,78 +868,69 @@ async function downloadSingleTrack(track) {
       '--no-playlist', '--socket-timeout', '30', '--retries', '3', '--no-part',
     ];
 
-    mainWindow?.webContents.send('download:progress', {
-      trackId: track.id, status: 'downloading', progress: 0,
-      title: track.title, artist: track.artist,
-    });
+    emitDownloadProgress(job, 'downloading', 0);
 
     const proc = spawn(ytDlp, args, { windowsHide: true });
 
     // Track active process for cancellation support
-    activeProcs.set(track.id, proc);
+    const procMeta = { proc, queueItemId: job.queueItemId, cancelled: false, suppressEvents: false };
+    activeProcs.set(track.id, procMeta);
 
-    proc.stdout.on('data', (chunk) => {
+    const handleProgressChunk = (chunk) => {
       const pct = chunk.toString().match(/(\d+\.?\d*)%/);
       if (pct) {
-        mainWindow?.webContents.send('download:progress', {
-          trackId: track.id, status: 'downloading', progress: parseFloat(pct[1]),
-          title: track.title, artist: track.artist,
-        });
+        emitDownloadProgress(job, 'downloading', parseFloat(pct[1]));
       }
-    });
+    };
+
+    proc.stdout.on('data', handleProgressChunk);
 
     // ── Collect stderr for failure logging ──────────────────────────────────
     const stderrChunks = [];
-    proc.stderr.on('data', (chunk) => { stderrChunks.push(chunk.toString()); });
+    proc.stderr.on('data', (chunk) => {
+      stderrChunks.push(chunk.toString());
+      handleProgressChunk(chunk);
+    });
 
     proc.on('close', (code) => {
       activeProcs.delete(track.id);
+      if (procMeta.cancelled) {
+        if (!procMeta.suppressEvents) {
+          emitDownloadProgress(job, 'failed', 0, { error: 'Cancelled' });
+        }
+        resolve({ success: false, error: 'Cancelled' });
+        return;
+      }
 
       if (code === 0) {
         let foundPath = null;
         try {
-          const base  = safeName.substring(0, 40).toLowerCase();
-          const files = fs.readdirSync(downloadDir);
-          const match = files.find(f =>
-            f.toLowerCase().startsWith(base) &&
-            /\.(mp3|m4a|opus|webm)$/.test(f)
-          );
-          if (match) foundPath = path.join(downloadDir, match);
-          const exact = path.join(downloadDir, `${safeName}.${audioFormat}`);
-          if (!foundPath && fs.existsSync(exact)) foundPath = exact;
+          foundPath = findDownloadedFile(downloadDir, safeName, audioFormat, existingFiles);
         } catch {}
 
         if (foundPath) {
           db.updateTrackDownloaded(track.id, foundPath);
-          mainWindow?.webContents.send('download:progress', {
-            trackId: track.id, status: 'done', progress: 100,
-            title: track.title, artist: track.artist, filePath: foundPath,
-          });
+          emitDownloadProgress(job, 'done', 100, { filePath: foundPath });
           resolve({ success: true, filePath: foundPath });
         } else {
-          mainWindow?.webContents.send('download:progress', {
-            trackId: track.id, status: 'failed', progress: 0,
-            title: track.title, artist: track.artist, error: 'File not found after download',
-          });
+          emitDownloadProgress(job, 'failed', 0, { error: 'File not found after download' });
           resolve({ success: false, error: 'File not found after download' });
         }
       } else {
         const stderrOutput = stderrChunks.join('').substring(0, 500);
         const errorMsg = `Exit code ${code}${stderrOutput ? ': ' + stderrOutput : ''}`;
-        mainWindow?.webContents.send('download:progress', {
-          trackId: track.id, status: 'failed', progress: 0,
-          title: track.title, artist: track.artist, error: errorMsg,
-        });
+        emitDownloadProgress(job, 'failed', 0, { error: errorMsg });
         resolve({ success: false, error: `yt-dlp exit code ${code}${stderrOutput ? ': ' + stderrOutput : ''}` });
       }
     });
 
     proc.on('error', (err) => {
       activeProcs.delete(track.id);
-      mainWindow?.webContents.send('download:progress', {
-        trackId: track.id, status: 'failed', progress: 0,
-        title: track.title, artist: track.artist, error: err.message,
-      });
+      if (procMeta.cancelled && procMeta.suppressEvents) {
+        resolve({ success: false, error: 'Cancelled' });
+        return;
+      }
+      emitDownloadProgress(job, 'failed', 0, { error: err.message });
       resolve({ success: false, error: err.message });
     });
   });
@@ -860,44 +946,61 @@ async function processDownloadQueue() {
 }
 
 ipcMain.handle('download:track', async (_, track) => {
-  if (!db.getTrackBySpotifyId(track.spotify_id)) db.upsertTrack(track);
-  const saved = db.getTrackBySpotifyId(track.spotify_id);
-  downloadQueue.push(saved || track);
-  processDownloadQueue();
-  return { queued: true };
+  return enqueueTrackDownload(track);
 });
 
 ipcMain.handle('download:all', async (_, tracks) => {
+  let queued = 0;
   for (const track of tracks) {
-    if (!db.getTrackBySpotifyId(track.spotify_id)) db.upsertTrack(track);
-    downloadQueue.push(db.getTrackBySpotifyId(track.spotify_id) || track);
+    const result = enqueueTrackDownload(track);
+    if (result.queued) queued += 1;
   }
-  processDownloadQueue();
-  return { queued: tracks.length };
+  return { queued };
 });
 
 ipcMain.handle('download:getStats',   ()  => db.getQueueStats());
 ipcMain.handle('download:getQueue',   ()  => db.getQueueItems());
-ipcMain.handle('download:clearQueue', ()  => { downloadQueue = []; db.clearQueue(); });
+ipcMain.handle('download:clearQueue', ()  => {
+  downloadQueue = [];
+  for (const procMeta of activeProcs.values()) {
+    procMeta.cancelled = true;
+    procMeta.suppressEvents = true;
+    procMeta.proc.kill();
+  }
+  db.clearQueue();
+});
 
 ipcMain.handle('download:cancel', (_, trackId) => {
-  const proc = activeProcs.get(trackId);
-  if (proc) {
-    proc.kill();
-    activeProcs.delete(trackId);
+  const procMeta = activeProcs.get(trackId);
+  if (procMeta) {
+    procMeta.cancelled = true;
+    procMeta.proc.kill();
   }
-  downloadQueue = downloadQueue.filter(t => t.id !== trackId);
-  return { cancelled: true };
+
+  let cancelled = !!procMeta;
+  downloadQueue = downloadQueue.filter(job => {
+    if (job.track.id !== trackId) return true;
+    emitDownloadProgress(job, 'failed', 0, { error: 'Cancelled' });
+    cancelled = true;
+    return false;
+  });
+
+  return { cancelled };
 });
 
 ipcMain.handle('download:retryFailed', async () => {
   const failed = db.getQueueItems().filter(i => i.status === 'failed');
+  const seen = new Set();
+  let requeued = 0;
   for (const item of failed) {
-    const t = db.getAllDownloadedTracks().find(t => t.id === item.track_id);
-    if (t) downloadQueue.push(t);
+    if (seen.has(item.track_id)) continue;
+    seen.add(item.track_id);
+    const track = db.getTrackById(item.track_id);
+    if (!track) continue;
+    const result = enqueueTrackDownload(track);
+    if (result.queued) requeued += 1;
   }
-  processDownloadQueue();
-  return { requeued: failed.length };
+  return { requeued };
 });
 
 // ─── Settings ─────────────────────────────────────────────────────────────────

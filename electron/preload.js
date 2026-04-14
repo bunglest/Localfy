@@ -30,6 +30,7 @@ const api = {
   // ─── Library / DB ──────────────────────────────────────────────────────────
   dbGetDownloaded: () => ipcRenderer.invoke('db:getDownloaded'),
   dbGetLiked: () => ipcRenderer.invoke('db:getLiked'),
+  dbGetTrack: (query) => ipcRenderer.invoke('db:getTrack', query),
   dbGetPlaylists: () => ipcRenderer.invoke('db:getPlaylists'),
   dbGetPlaylistTracks: (id) => ipcRenderer.invoke('db:getPlaylistTracks', id),
   dbGetFolders: () => ipcRenderer.invoke('db:getFolders'),

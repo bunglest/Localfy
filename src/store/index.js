@@ -87,6 +87,61 @@ function persistPlayerPrefs(state) {
   });
 }
 
+function sameTrack(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id && a.id === b.id) return true;
+  return !!(a.spotify_id && b.spotify_id && a.spotify_id === b.spotify_id);
+}
+
+function mergeTrackRecord(track, savedTrack) {
+  return savedTrack ? { ...track, ...savedTrack } : track;
+}
+
+function mergeQueueTrack(queue, patch) {
+  return queue.map(track => sameTrack(track, patch) ? { ...track, ...patch } : track);
+}
+
+function buildActiveDownloadsFromQueue(queue) {
+  return queue.reduce((acc, item) => {
+    if (!item?.track_id) return acc;
+    const prev = acc[item.track_id];
+    const prevUpdated = new Date(prev?.updatedAt || 0).getTime();
+    const itemUpdated = new Date(item.updated_at || item.created_at || 0).getTime();
+    if (!prev || itemUpdated >= prevUpdated) {
+      acc[item.track_id] = {
+        progress: item.progress || 0,
+        status: item.status,
+        title: item.title,
+        artist: item.artist,
+        filePath: item.file_path,
+        queueItemId: item.id,
+        error: item.error,
+        updatedAt: item.updated_at || item.created_at || null,
+      };
+    }
+    return acc;
+  }, {});
+}
+
+function upsertQueueItem(queue, data) {
+  const queueItemId = data.queueItemId || data.id;
+  if (!queueItemId) return queue;
+  const nextItem = {
+    ...queue.find(item => item.id === queueItemId),
+    id: queueItemId,
+    track_id: data.trackId,
+    status: data.status,
+    progress: data.progress || 0,
+    title: data.title,
+    artist: data.artist,
+    file_path: data.filePath,
+    error: data.error || null,
+    updated_at: new Date().toISOString(),
+  };
+  const withoutItem = queue.filter(item => item.id !== queueItemId);
+  return [nextItem, ...withoutItem];
+}
+
 export const usePlayerStore = create((set, get) => ({
   currentTrack: null,
   queue: [],
@@ -105,24 +160,35 @@ export const usePlayerStore = create((set, get) => ({
 
   playTrack: async (track, queue = null) => {
     const { audioEl } = get();
-    const fileUrl = track.file_path ? await window.localfy.playerGetFileUrl(track.file_path) : null;
+    const savedTrack = await window.localfy.dbGetTrack({
+      id: track.id,
+      spotifyId: track.spotify_id,
+    }).catch(() => null);
+    const resolvedTrack = mergeTrackRecord(track, savedTrack);
+    const fileUrl = resolvedTrack.file_path ? await window.localfy.playerGetFileUrl(resolvedTrack.file_path) : null;
+    const newQueue = (queue || [track]).map(item => sameTrack(item, resolvedTrack) ? mergeTrackRecord(item, resolvedTrack) : item);
+    const idx = queue ? Math.max(0, newQueue.findIndex(item => sameTrack(item, resolvedTrack))) : 0;
 
     if (!fileUrl) {
       // Not downloaded — queue it for download automatically
-      window.localfy.downloadTrack(track).catch(() => {});
+      const result = await window.localfy.downloadTrack(resolvedTrack).catch(() => null);
+      if (result?.alreadyDownloaded && result.filePath) {
+        get().playTrack({ ...resolvedTrack, file_path: result.filePath, downloaded: true }, newQueue);
+        return;
+      }
+      const downloadToastMessage = result?.duplicate
+        ? `"${resolvedTrack.title}" is already downloading`
+        : `Downloading "${resolvedTrack.title}"... click again when ready`;
       useToastStore.getState().add(`Downloading "${track.title}"… click again when ready`, 'info');
       // Still set as current track so the UI shows what's loading
       set({
-        currentTrack: { ...track, _pending: true },
-        queue: queue || [track],
-        queueIndex: queue ? queue.findIndex(t => t.id === track.id) : 0,
+        currentTrack: { ...resolvedTrack, _pending: true },
+        queue: newQueue,
+        queueIndex: idx,
         playing: false,
       });
       return;
     }
-
-    const newQueue = queue || [track];
-    const idx = queue ? queue.findIndex(t => t.id === track.id) : 0;
 
     if (audioEl) {
       audioEl.src = fileUrl;
@@ -136,7 +202,7 @@ export const usePlayerStore = create((set, get) => ({
     }
 
     set({
-      currentTrack: track,
+      currentTrack: resolvedTrack,
       queue: newQueue,
       queueIndex: idx,
       playing: true,
@@ -146,13 +212,13 @@ export const usePlayerStore = create((set, get) => ({
     // Discord Rich Presence — elapsedSeconds=0 means "just started" (main process
     // computes startTimestamp right before the RPC call to avoid IPC-delay skew)
     window.localfy.discordUpdatePresence({
-      title: track.title,
-      artist: track.artist,
-      albumArt: track.album_art || '',
+      title: resolvedTrack.title,
+      artist: resolvedTrack.artist,
+      albumArt: resolvedTrack.album_art || '',
       elapsedSeconds: 0,
     }).catch(() => {});
 
-    window.localfy.dbIncrementPlay(track.id).catch(() => {});
+    window.localfy.dbIncrementPlay(resolvedTrack.id).catch(() => {});
   },
 
   playPause: () => {
@@ -182,6 +248,20 @@ export const usePlayerStore = create((set, get) => ({
           elapsedSeconds: Math.floor(progress),
         }).catch(() => {});
       }
+    }
+  },
+
+  pause: () => {
+    const { audioEl, currentTrack } = get();
+    if (!audioEl) return;
+    audioEl.pause();
+    set({ playing: false });
+    if (currentTrack && !currentTrack._pending) {
+      window.localfy.discordUpdatePresence({
+        title: currentTrack.title,
+        artist: currentTrack.artist,
+        albumArt: currentTrack.album_art || '',
+      }).catch(() => {});
     }
   },
 
@@ -411,25 +491,80 @@ export const useDownloadStore = create((set, get) => ({
 
   loadQueue: async () => {
     const queue = await window.localfy.downloadGetQueue();
-    set({ queue });
+    set({ queue, activeDownloads: buildActiveDownloadsFromQueue(queue) });
   },
 
   downloadTrack: async (track) => {
-    await window.localfy.downloadTrack(track);
-    set(s => ({
-      activeDownloads: {
-        ...s.activeDownloads,
-        [track.id]: { progress: 0, status: 'queued', title: track.title, artist: track.artist }
-      }
-    }));
+    const result = await window.localfy.downloadTrack(track);
+    if (result?.queued) {
+      set(s => ({
+        activeDownloads: {
+          ...s.activeDownloads,
+          [track.id]: {
+            progress: 0,
+            status: 'queued',
+            title: track.title,
+            artist: track.artist,
+            queueItemId: result.queueItemId,
+          }
+        },
+        queue: upsertQueueItem(s.queue, {
+          queueItemId: result.queueItemId,
+          trackId: track.id,
+          title: track.title,
+          artist: track.artist,
+          status: 'queued',
+          progress: 0,
+        }),
+      }));
+    } else if (result?.duplicate) {
+      set(s => ({
+        activeDownloads: {
+          ...s.activeDownloads,
+          [track.id]: {
+            progress: s.activeDownloads[track.id]?.progress || 0,
+            status: result.existingStatus || 'queued',
+            title: track.title,
+            artist: track.artist,
+            queueItemId: result.queueItemId,
+          }
+        },
+        queue: upsertQueueItem(s.queue, {
+          queueItemId: result.queueItemId,
+          trackId: track.id,
+          title: track.title,
+          artist: track.artist,
+          status: result.existingStatus || 'queued',
+          progress: s.activeDownloads[track.id]?.progress || 0,
+        }),
+      }));
+    } else if (result?.alreadyDownloaded) {
+      set(s => ({
+        activeDownloads: {
+          ...s.activeDownloads,
+          [track.id]: {
+            progress: 100,
+            status: 'done',
+            title: track.title,
+            artist: track.artist,
+            filePath: result.filePath,
+          }
+        }
+      }));
+    }
+    return result;
   },
 
   downloadAll: async (tracks) => {
-    await window.localfy.downloadAll(tracks);
+    const result = await window.localfy.downloadAll(tracks);
+    get().loadQueue();
+    get().loadStats();
+    return result;
   },
 
   handleProgress: (data) => {
     set(s => ({
+      queue: upsertQueueItem(s.queue, data),
       activeDownloads: {
         ...s.activeDownloads,
         [data.trackId]: {
@@ -438,12 +573,24 @@ export const useDownloadStore = create((set, get) => ({
           title: data.title,
           artist: data.artist,
           filePath: data.filePath,
+          queueItemId: data.queueItemId,
+          error: data.error,
         }
       }
     }));
+
+    if (data.status === 'done' && data.filePath) {
+      usePlayerStore.setState(s => ({
+        currentTrack: sameTrack(s.currentTrack, { id: data.trackId })
+          ? { ...s.currentTrack, downloaded: true, file_path: data.filePath }
+          : s.currentTrack,
+        queue: mergeQueueTrack(s.queue, { id: data.trackId, downloaded: true, file_path: data.filePath }),
+      }));
+    }
     // Refresh stats and library when download finishes
     if (data.status === 'done' || data.status === 'failed') {
       get().loadStats();
+      get().loadQueue();
       useLibraryStore.getState().loadDownloaded();
       useLibraryStore.getState().loadLiked();
 

@@ -48,8 +48,14 @@ export default function TrackRow({ track, index, queue, showAlbum = true }) {
   const handleDownload = async (e) => {
     e.stopPropagation();
     if (isDone) { toast('Already downloaded', 'info'); return; }
-    await downloadTrack(track);
-    toast(`Queued: ${track.title}`, 'info');
+    const result = await downloadTrack(track);
+    if (result?.alreadyDownloaded) {
+      toast('Already downloaded', 'info');
+    } else if (result?.duplicate) {
+      toast(`Already queued: ${track.title}`, 'info');
+    } else if (result?.queued) {
+      toast(`Queued: ${track.title}`, 'info');
+    }
   };
 
   const handleCtx = (e) => {

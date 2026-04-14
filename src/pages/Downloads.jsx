@@ -4,13 +4,14 @@ import { useDownloadStore, useToastStore } from '../store';
 import { DownloadIcon, TrashIcon, RefreshIcon, CheckIcon, XIcon, AlertIcon } from '../components/Icons';
 
 export default function Downloads() {
-  const { stats, activeDownloads, loadStats, clearQueue } = useDownloadStore();
+  const { stats, queue, activeDownloads, loadStats, loadQueue, clearQueue } = useDownloadStore();
   const { add: toast } = useToastStore();
   const [ytDlpOk, setYtDlpOk]   = useState(null);
   const [filter,   setFilter]    = useState('all'); // 'all' | 'done' | 'queued' | 'failed' | 'downloading'
 
   useEffect(() => {
     loadStats();
+    loadQueue();
     checkYtDlp();
   }, []);
 
@@ -19,7 +20,10 @@ export default function Downloads() {
       id => ['downloading', 'queued'].includes(activeDownloads[id]?.status)
     );
     const ms = hasActive ? 2000 : 10000;
-    const interval = setInterval(() => loadStats(), ms);
+    const interval = setInterval(() => {
+      loadStats();
+      loadQueue();
+    }, ms);
     return () => clearInterval(interval);
   }, [activeDownloads]);
 
@@ -35,26 +39,18 @@ export default function Downloads() {
 
   const handleRetry = async () => {
     await window.localfy.downloadRetryFailed();
+    await loadQueue();
+    await loadStats();
     toast('Retrying failed downloads…', 'info');
   };
 
-  // Build a flat list from activeDownloads (live, event-driven)
-  const allItems = useMemo(() =>
-    Object.entries(activeDownloads).map(([id, d]) => ({
-      track_id: id,
-      title: d.title,
-      artist: d.artist,
-      status: d.status,
-      progress: d.progress,
-    })),
-    [activeDownloads]
-  );
+  const allItems = useMemo(() => queue, [queue]);
 
   // Live stats derived directly from activeDownloads — always accurate
   const liveStats = useMemo(() => ({
     total:       allItems.length || stats.total || 0,
     done:        allItems.filter(i => i.status === 'done').length   || stats.done   || 0,
-    queued:      allItems.filter(i => i.status === 'queued').length || stats.queued || 0,
+    queued:      allItems.filter(i => i.status === 'queued' || i.status === 'downloading').length || stats.queued || 0,
     failed:      allItems.filter(i => i.status === 'failed').length || stats.failed || 0,
     downloading: allItems.filter(i => i.status === 'downloading').length,
   }), [allItems, stats]);
@@ -71,7 +67,7 @@ export default function Downloads() {
   const statCards = [
     { key: 'all',    value: liveStats.total,       label: 'Total',       color: 'var(--text-2)' },
     { key: 'done',   value: liveStats.done,         label: 'Downloaded',  color: 'var(--green)' },
-    { key: 'queued', value: liveStats.queued + liveStats.downloading, label: 'In Queue', color: 'var(--pink)', pulse: liveStats.downloading > 0 },
+    { key: 'queued', value: liveStats.queued, label: 'In Queue', color: 'var(--pink)', pulse: liveStats.downloading > 0 },
     { key: 'failed', value: liveStats.failed,       label: 'Failed',      color: 'var(--red)' },
   ];
 
@@ -205,7 +201,7 @@ export default function Downloads() {
         <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
           {queueItems.map((item, i) => (
             <QueueItem
-              key={item.track_id}
+              key={item.id || `${item.track_id}-${i}`}
               item={item}
               divider={i < queueItems.length - 1}
             />

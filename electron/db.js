@@ -271,15 +271,17 @@ function deleteFolder(id) {
 
 function addToQueue(trackId) {
   ensureReady();
-  store.queue.push({
-    id: Date.now(),
+  const item = {
+    id: crypto.randomUUID(),
     track_id: trackId,
     status: 'queued',
     progress: 0,
     error: null,
     created_at: new Date().toISOString(),
-  });
+  };
+  store.queue.push(item);
   saveKey('queue');
+  return item;
 }
 
 function updateQueueItem(id, status, progress, error) {

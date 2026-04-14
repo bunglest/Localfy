@@ -36,7 +36,7 @@ export default function App() {
   const showCommandPalette = useUIStore(s => s.showCommandPalette);
   const { setAudioEl, setProgress, setDuration, setPlaying, next, currentTrack } = usePlayerStore();
   const { refresh } = useLibraryStore();
-  const { handleProgress, loadStats } = useDownloadStore();
+  const { handleProgress, loadStats, loadQueue } = useDownloadStore();
 
   // Init auth
   useEffect(() => { init(); }, []);
@@ -124,6 +124,7 @@ export default function App() {
     if (loggedIn) {
       refresh();
       loadStats();
+      loadQueue();
     }
   }, [loggedIn]);
 

@@ -64,8 +64,10 @@ export default function Home() {
 
   const handleDownload = async (e, track) => {
     e.stopPropagation();
-    await downloadTrack(toLocalfy(track));
-    toast(`Queued: ${track.name}`, 'info');
+    const result = await downloadTrack(toLocalfy(track));
+    if (result?.alreadyDownloaded) toast('Already downloaded', 'info');
+    else if (result?.duplicate) toast(`Already queued: ${track.name}`, 'info');
+    else if (result?.queued) toast(`Queued: ${track.name}`, 'info');
   };
 
   if (loading) return <SkeletonHome />;
