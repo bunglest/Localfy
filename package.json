@@ -1,6 +1,6 @@
 {
   "name": "localfy",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "Your music, downloaded. A Spotify-powered desktop player.",
   "main": "electron/main.js",
   "scripts": {

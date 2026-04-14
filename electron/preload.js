@@ -147,6 +147,7 @@ const api = {
   discordGetClientId: () => ipcRenderer.invoke('discord:getClientId'),
 
   // ─── Auto-Updater ──────────────────────────────────────────────────────────
+  updaterGetState: () => ipcRenderer.invoke('updater:getState'),
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterDownload: () => ipcRenderer.invoke('updater:download'),
   updaterInstall: () => ipcRenderer.invoke('updater:install'),

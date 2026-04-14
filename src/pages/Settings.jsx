@@ -27,6 +27,16 @@ export default function Settings() {
   const { theme, toggleTheme } = useUIStore();
   const [updateStatus, setUpdateStatus] = useState(null); // null | { status, version?, percent?, message? }
 
+  const applyUpdaterResult = (result) => {
+    if (result?.state) {
+      setUpdateStatus(result.state);
+      return;
+    }
+    if (result?.status === 'error' || result?.status === 'dev') {
+      setUpdateStatus({ status: result.status, message: result.message });
+    }
+  };
+
   useEffect(() => {
     loadDownloadPath();
     loadStats();
@@ -35,6 +45,9 @@ export default function Settings() {
     window.localfy.discordGetClientId().then(id => setDiscordClientId(id || '')).catch(() => {});
     window.localfy.settingsGet('audio.format', 'mp3').then(v => setAudioFormat(v)).catch(() => {});
     window.localfy.settingsGet('audio.quality', '0').then(v => setAudioQuality(String(v))).catch(() => {});
+    window.localfy.updaterGetState?.().then(state => {
+      if (state?.status && state.status !== 'idle') setUpdateStatus(state);
+    }).catch(() => {});
     loadPlaylists();
 
     const unsub = window.localfy.onImportProgress((data) => {
@@ -522,19 +535,25 @@ export default function Settings() {
             className="btn btn-ghost btn-sm"
             onClick={async () => {
               setUpdateStatus({ status: 'checking' });
-              await window.localfy.updaterCheck();
+              applyUpdaterResult(await window.localfy.updaterCheck());
             }}
             disabled={updateStatus?.status === 'checking' || updateStatus?.status === 'downloading'}
           >
             {updateStatus?.status === 'checking' ? 'Checking…' : 'Check for Updates'}
           </button>
 
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+            Current version: v{appVersion || '—'}
+          </span>
+
           {updateStatus?.status === 'available' && (
             <>
               <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>
                 v{updateStatus.version} available!
               </span>
-              <button className="btn btn-primary btn-sm" onClick={() => window.localfy.updaterDownload()}>
+              <button className="btn btn-primary btn-sm" onClick={async () => {
+                applyUpdaterResult(await window.localfy.updaterDownload());
+              }}>
                 Download Update
               </button>
             </>
@@ -566,7 +585,9 @@ export default function Settings() {
           )}
 
           {updateStatus?.status === 'up-to-date' && (
-            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>You're on the latest version</span>
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+              You're on the latest version{updateStatus.checkedAt ? ` as of ${new Date(updateStatus.checkedAt).toLocaleTimeString()}` : ''}
+            </span>
           )}
 
           {updateStatus?.status === 'error' && (

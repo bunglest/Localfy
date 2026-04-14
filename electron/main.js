@@ -132,46 +132,153 @@ autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.logger = { info: (...a) => console.log('[updater]', ...a), warn: (...a) => console.warn('[updater]', ...a), error: (...a) => console.error('[updater]', ...a) };
 
+let updaterState = {
+  status: 'idle',
+  currentVersion: app.getVersion(),
+  version: null,
+  releaseNotes: null,
+  percent: 0,
+  bytesPerSecond: 0,
+  total: 0,
+  transferred: 0,
+  checkedAt: null,
+  message: null,
+};
+let updateCheckPromise = null;
+
 function sendUpdateStatus(status, data = {}) {
-  if (mainWindow) mainWindow.webContents.send('updater:status', { status, ...data });
+  const next = {
+    ...updaterState,
+    status,
+    currentVersion: app.getVersion(),
+  };
+
+  if (status === 'checking') {
+    next.checkedAt = new Date().toISOString();
+    next.message = null;
+    next.percent = 0;
+    next.bytesPerSecond = 0;
+    next.total = 0;
+    next.transferred = 0;
+  }
+
+  if (status === 'available') {
+    next.version = data.version || null;
+    next.releaseNotes = data.releaseNotes || null;
+    next.message = null;
+    next.percent = 0;
+    next.bytesPerSecond = 0;
+    next.total = 0;
+    next.transferred = 0;
+    next.checkedAt = new Date().toISOString();
+  }
+
+  if (status === 'up-to-date') {
+    next.version = data.version || null;
+    next.releaseNotes = null;
+    next.message = data.message || null;
+    next.percent = 0;
+    next.bytesPerSecond = 0;
+    next.total = 0;
+    next.transferred = 0;
+    next.checkedAt = new Date().toISOString();
+  }
+
+  if (status === 'downloading') {
+    next.version = data.version || next.version || null;
+    next.percent = Number.isFinite(data.percent) ? Math.round(data.percent) : (next.percent || 0);
+    next.bytesPerSecond = data.bytesPerSecond || 0;
+    next.total = data.total || 0;
+    next.transferred = data.transferred || 0;
+    next.message = null;
+  }
+
+  if (status === 'ready') {
+    next.version = data.version || next.version || null;
+    next.percent = 100;
+    next.message = null;
+    next.checkedAt = new Date().toISOString();
+  }
+
+  if (status === 'error' || status === 'dev') {
+    next.message = data.message || 'Update check failed';
+    next.checkedAt = new Date().toISOString();
+    next.percent = 0;
+    next.bytesPerSecond = 0;
+    next.total = 0;
+    next.transferred = 0;
+  }
+
+  updaterState = next;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('updater:status', updaterState);
+  }
+}
+
+async function runUpdateCheck() {
+  if (isDev) {
+    sendUpdateStatus('dev', { message: 'Updates disabled in dev mode' });
+    return { status: 'dev', message: 'Updates disabled in dev mode', state: updaterState };
+  }
+
+  if (updateCheckPromise) return updateCheckPromise;
+
+  sendUpdateStatus('checking');
+  updateCheckPromise = autoUpdater.checkForUpdates()
+    .then((result) => ({ status: 'ok', updateInfo: result?.updateInfo || null, state: updaterState }))
+    .catch((err) => {
+      const message = err?.message || 'Update check failed';
+      sendUpdateStatus('error', { message });
+      return { status: 'error', message, state: updaterState };
+    })
+    .finally(() => {
+      updateCheckPromise = null;
+    });
+
+  return updateCheckPromise;
 }
 
 autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
 autoUpdater.on('update-available', (info) => sendUpdateStatus('available', { version: info.version, releaseNotes: info.releaseNotes }));
-autoUpdater.on('update-not-available', () => sendUpdateStatus('up-to-date'));
-autoUpdater.on('download-progress', (progress) => sendUpdateStatus('downloading', { percent: Math.round(progress.percent), bytesPerSecond: progress.bytesPerSecond, total: progress.total, transferred: progress.transferred }));
+autoUpdater.on('update-not-available', (info) => sendUpdateStatus('up-to-date', { version: info?.version || app.getVersion() }));
+autoUpdater.on('download-progress', (progress) => sendUpdateStatus('downloading', { version: updaterState.version, percent: Math.round(progress.percent), bytesPerSecond: progress.bytesPerSecond, total: progress.total, transferred: progress.transferred }));
 autoUpdater.on('update-downloaded', (info) => sendUpdateStatus('ready', { version: info.version }));
 autoUpdater.on('error', (err) => sendUpdateStatus('error', { message: err?.message || 'Update check failed' }));
 
+ipcMain.handle('updater:getState', () => updaterState);
 ipcMain.handle('updater:check', async () => {
-  if (isDev) return { status: 'dev', message: 'Updates disabled in dev mode' };
-  try {
-    const result = await autoUpdater.checkForUpdates();
-    return { status: 'ok', updateInfo: result?.updateInfo };
-  } catch (err) {
-    return { status: 'error', message: err.message };
-  }
+  return runUpdateCheck();
 });
 
 ipcMain.handle('updater:download', async () => {
+  if (isDev) {
+    sendUpdateStatus('dev', { message: 'Updates disabled in dev mode' });
+    return { status: 'dev', message: 'Updates disabled in dev mode', state: updaterState };
+  }
   try {
     await autoUpdater.downloadUpdate();
-    return { status: 'ok' };
+    return { status: 'ok', state: updaterState };
   } catch (err) {
-    return { status: 'error', message: err.message };
+    const message = err?.message || 'Update download failed';
+    sendUpdateStatus('error', { message });
+    return { status: 'error', message, state: updaterState };
   }
 });
 
 ipcMain.handle('updater:install', () => {
+  if (updaterState.status !== 'ready') {
+    return { status: 'error', message: 'No downloaded update is ready to install', state: updaterState };
+  }
   isQuitting = true;
   autoUpdater.quitAndInstall(false, true);
+  return { status: 'ok' };
 });
 
 // Check for updates 30 seconds after launch (production only)
 app.whenReady().then(() => {
   if (!isDev) {
     setTimeout(() => {
-      autoUpdater.checkForUpdates().catch(() => {});
+      runUpdateCheck().catch(() => {});
     }, 30_000);
   }
 });
