@@ -59,6 +59,11 @@ const api = {
   dbImport: () => ipcRenderer.invoke('db:import'),
 
   // ─── Downloads ─────────────────────────────────────────────────────────────
+  downloadEnqueue: (track, options) => ipcRenderer.invoke('download:enqueue', track, options),
+  downloadGetSnapshot: () => ipcRenderer.invoke('download:getSnapshot'),
+  downloadCancelJob: (jobId) => ipcRenderer.invoke('download:cancel', jobId),
+  downloadRetry: (target) => ipcRenderer.invoke('download:retry', target),
+  downloadClearHistory: () => ipcRenderer.invoke('download:clearHistory'),
   downloadTrack: (track) => ipcRenderer.invoke('download:track', track),
   downloadAll: (tracks) => ipcRenderer.invoke('download:all', tracks),
   downloadGetStats: () => ipcRenderer.invoke('download:getStats'),
@@ -67,6 +72,11 @@ const api = {
   downloadCheckYtDlp: () => ipcRenderer.invoke('download:checkYtDlp'),
   downloadRetryFailed: () => ipcRenderer.invoke('download:retryFailed'),
   downloadCancel: (trackId) => ipcRenderer.invoke('download:cancel', trackId),
+  onDownloadChanged: (cb) => {
+    const listener = (_, data) => cb(data);
+    ipcRenderer.on('download:changed', listener);
+    return () => ipcRenderer.removeListener('download:changed', listener);
+  },
   onDownloadProgress: (cb) => {
     const listener = (_, data) => cb(data);
     ipcRenderer.on('download:progress', listener);

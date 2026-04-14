@@ -4,28 +4,15 @@ import { useDownloadStore, useToastStore } from '../store';
 import { DownloadIcon, TrashIcon, RefreshIcon, CheckIcon, XIcon, AlertIcon } from '../components/Icons';
 
 export default function Downloads() {
-  const { stats, queue, activeDownloads, loadStats, loadQueue, clearQueue } = useDownloadStore();
+  const { stats, jobs, loadSnapshot, clearHistory, cancelJob, retryFailed } = useDownloadStore();
   const { add: toast } = useToastStore();
   const [ytDlpOk, setYtDlpOk]   = useState(null);
-  const [filter,   setFilter]    = useState('all'); // 'all' | 'done' | 'queued' | 'failed' | 'downloading'
+  const [filter,   setFilter]    = useState('all'); // 'all' | 'completed' | 'queued' | 'failed' | 'cancelled'
 
   useEffect(() => {
-    loadStats();
-    loadQueue();
+    loadSnapshot();
     checkYtDlp();
   }, []);
-
-  useEffect(() => {
-    const hasActive = Object.keys(activeDownloads).some(
-      id => ['downloading', 'queued'].includes(activeDownloads[id]?.status)
-    );
-    const ms = hasActive ? 2000 : 10000;
-    const interval = setInterval(() => {
-      loadStats();
-      loadQueue();
-    }, ms);
-    return () => clearInterval(interval);
-  }, [activeDownloads]);
 
   const checkYtDlp = async () => {
     const result = await window.localfy.downloadCheckYtDlp();
@@ -33,41 +20,43 @@ export default function Downloads() {
   };
 
   const handleClear = async () => {
-    await clearQueue();
-    toast('Queue cleared', 'info');
+    await clearHistory();
+    toast('Download history cleared', 'info');
   };
 
   const handleRetry = async () => {
-    await window.localfy.downloadRetryFailed();
-    await loadQueue();
-    await loadStats();
+    await retryFailed();
     toast('Retrying failed downloads…', 'info');
   };
 
-  const allItems = useMemo(() => queue, [queue]);
+  const allItems = useMemo(() => jobs, [jobs]);
 
   // Live stats derived directly from activeDownloads — always accurate
   const liveStats = useMemo(() => ({
-    total:       allItems.length || stats.total || 0,
-    done:        allItems.filter(i => i.status === 'done').length   || stats.done   || 0,
-    queued:      allItems.filter(i => i.status === 'queued' || i.status === 'downloading').length || stats.queued || 0,
-    failed:      allItems.filter(i => i.status === 'failed').length || stats.failed || 0,
-    downloading: allItems.filter(i => i.status === 'downloading').length,
+    total: allItems.length || stats.total || 0,
+    completed: allItems.filter(i => i.state === 'completed').length || stats.completed || stats.done || 0,
+    done: allItems.filter(i => i.state === 'completed').length || stats.completed || stats.done || 0,
+    queued: allItems.filter(i => i.state === 'queued').length || stats.queued || 0,
+    running: allItems.filter(i => i.state === 'running').length || stats.running || 0,
+    active: allItems.filter(i => i.state === 'queued' || i.state === 'running').length || stats.active || 0,
+    failed: allItems.filter(i => i.state === 'failed').length || stats.failed || 0,
+    cancelled: allItems.filter(i => i.state === 'cancelled').length || stats.cancelled || 0,
+    downloading: allItems.filter(i => i.state === 'running').length || stats.running || 0,
   }), [allItems, stats]);
 
   // Filtered queue
   const queueItems = useMemo(() => {
     if (filter === 'all') return allItems;
-    if (filter === 'queued') return allItems.filter(i => i.status === 'queued' || i.status === 'downloading');
-    return allItems.filter(i => i.status === filter);
+    if (filter === 'queued') return allItems.filter(i => i.state === 'queued' || i.state === 'running');
+    return allItems.filter(i => i.state === filter);
   }, [allItems, filter]);
 
-  const totalPct = liveStats.total > 0 ? ((liveStats.done / liveStats.total) * 100) : 0;
+  const totalPct = liveStats.total > 0 ? ((liveStats.completed / liveStats.total) * 100) : 0;
 
   const statCards = [
     { key: 'all',    value: liveStats.total,       label: 'Total',       color: 'var(--text-2)' },
-    { key: 'done',   value: liveStats.done,         label: 'Downloaded',  color: 'var(--green)' },
-    { key: 'queued', value: liveStats.queued, label: 'In Queue', color: 'var(--pink)', pulse: liveStats.downloading > 0 },
+    { key: 'completed', value: liveStats.completed, label: 'Downloaded',  color: 'var(--green)' },
+    { key: 'queued', value: liveStats.active, label: 'In Queue', color: 'var(--pink)', pulse: liveStats.running > 0 },
     { key: 'failed', value: liveStats.failed,       label: 'Failed',      color: 'var(--red)' },
   ];
 
@@ -153,10 +142,11 @@ export default function Downloads() {
       <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <h2 className="section-title">
-            {filter === 'all'    ? 'All Downloads'  :
-             filter === 'done'   ? 'Downloaded'     :
-             filter === 'queued' ? 'In Queue'       :
-             filter === 'failed' ? 'Failed'         : 'Downloads'}
+            {filter === 'all'       ? 'All Downloads' :
+             filter === 'completed' ? 'Downloaded'    :
+             filter === 'queued'    ? 'In Queue'      :
+             filter === 'failed'    ? 'Failed'        :
+             filter === 'cancelled' ? 'Cancelled'     : 'Downloads'}
           </h2>
           {filter !== 'all' && (
             <button
@@ -260,18 +250,21 @@ function StatCard({ value, label, color, pulse, active, onClick }) {
 }
 
 function QueueItem({ item, divider }) {
+  const { cancelJob } = useDownloadStore();
   const statusColor = s => ({
-    done:        'var(--green)',
-    failed:      'var(--red)',
-    downloading: 'var(--pink)',
-    queued:      'var(--text-3)',
+    completed: 'var(--green)',
+    failed: 'var(--red)',
+    running: 'var(--pink)',
+    queued: 'var(--text-3)',
+    cancelled: 'var(--text-3)',
   }[s] || 'var(--text-3)');
 
   const statusLabel = s => ({
-    done:        'Done',
-    failed:      'Failed',
-    downloading: 'Downloading',
-    queued:      'Queued',
+    completed: 'Done',
+    failed: 'Failed',
+    running: 'Downloading',
+    queued: 'Queued',
+    cancelled: 'Cancelled',
   }[s] || s);
 
   return (
@@ -284,12 +277,12 @@ function QueueItem({ item, divider }) {
         width: 44, height: 44, borderRadius: 8,
         background: 'var(--surface-2)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        color: statusColor(item.status),
+        color: statusColor(item.state),
         flexShrink: 0,
       }}>
-        {item.status === 'done'   && <CheckIcon size={18} />}
-        {item.status === 'failed' && <XIcon size={18} />}
-        {(item.status === 'queued' || item.status === 'downloading') && <DownloadIcon size={18} />}
+        {item.state === 'completed' && <CheckIcon size={18} />}
+        {(item.state === 'failed' || item.state === 'cancelled') && <XIcon size={18} />}
+        {(item.state === 'queued' || item.state === 'running') && <DownloadIcon size={18} />}
       </div>
 
       {/* Info + progress bar */}
@@ -300,7 +293,7 @@ function QueueItem({ item, divider }) {
         <div style={{ fontSize: 12, color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1, fontWeight: 500 }}>
           <ArtistLinks artist={item.artist} />
         </div>
-        {item.status === 'downloading' && (
+        {item.state === 'running' && (
           <div className="dl-progress-track" style={{ marginTop: 6 }}>
             <div className="dl-progress-fill downloading" style={{ width: `${item.progress || 0}%` }} />
           </div>
@@ -309,7 +302,7 @@ function QueueItem({ item, divider }) {
 
       {/* Percentage */}
       <div style={{ textAlign: 'right' }}>
-        {item.status === 'downloading' && (
+        {item.state === 'running' && (
           <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--pink)', fontWeight: 700 }}>
             {Math.round(item.progress || 0)}%
           </span>
@@ -320,20 +313,20 @@ function QueueItem({ item, divider }) {
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
         <div style={{
           display: 'inline-flex', alignItems: 'center', gap: 5,
-          color: statusColor(item.status),
+          color: statusColor(item.state),
           fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
           letterSpacing: 0.3,
         }}>
-          {item.status === 'downloading' && (
+          {item.state === 'running' && (
             <div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--pink)', animation: 'pulse 1s infinite' }} />
           )}
-          {statusLabel(item.status)}
+          {statusLabel(item.state)}
         </div>
-        {(item.status === 'downloading' || item.status === 'queued') && (
+        {(item.state === 'running' || item.state === 'queued') && (
           <button
             className="track-action-btn"
             title="Cancel download"
-            onClick={() => window.localfy.downloadCancel(item.track_id)}
+            onClick={() => cancelJob(item.id)}
             style={{ color: 'var(--red)', flexShrink: 0 }}
           >
             <XIcon size={14} />

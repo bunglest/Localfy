@@ -16,6 +16,7 @@ let store = {
   folders: {},        // id -> folder object
   playlistTracks: {}, // playlistId -> [{trackId, position, addedAt}]
   queue: [],          // [{id, trackId, status, progress, error, createdAt}]
+  downloadJobs: [],   // [{id, track_id, spotify_id, state, intent, ...}]
   settings: {},       // key -> value string
   playHistory: [],    // [{id, trackId, playedAt, duration_ms}]
   skipHistory: [],    // [{id, trackId, listenedMs, totalMs, skippedAt}]
@@ -24,6 +25,11 @@ let store = {
 
 let dataDir = null;
 let loaded = false;
+let downloadJobsMigrated = false;
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 function getDataDir() {
   if (dataDir) return dataDir;
@@ -65,6 +71,132 @@ function saveKey(key) {
 
 function ensureReady() {
   loadStore();
+  if (!downloadJobsMigrated) {
+    migrateLegacyQueueToDownloadJobs();
+    downloadJobsMigrated = true;
+  }
+}
+
+function clearTrackDownloadState(idOrSpotifyId) {
+  ensureReady();
+  if (store.tracks[idOrSpotifyId]) {
+    store.tracks[idOrSpotifyId].downloaded = 0;
+    store.tracks[idOrSpotifyId].file_path = null;
+    saveKey('tracks');
+    return;
+  }
+  const track = Object.values(store.tracks).find(t => t.spotify_id === idOrSpotifyId);
+  if (track) {
+    track.downloaded = 0;
+    track.file_path = null;
+    saveKey('tracks');
+  }
+}
+
+function downloadStateFromLegacyStatus(status) {
+  return {
+    queued: 'queued',
+    downloading: 'running',
+    done: 'completed',
+    failed: 'failed',
+    cancelled: 'cancelled',
+  }[status] || 'queued';
+}
+
+function legacyStatusFromDownloadState(state) {
+  return {
+    queued: 'queued',
+    running: 'downloading',
+    completed: 'done',
+    failed: 'failed',
+    cancelled: 'failed',
+  }[state] || 'queued';
+}
+
+function normalizeDownloadJob(job = {}) {
+  const now = nowIso();
+  return {
+    id: job.id || crypto.randomUUID(),
+    track_id: job.track_id || null,
+    spotify_id: job.spotify_id || null,
+    intent: job.intent || 'download',
+    state: job.state || 'queued',
+    progress: Number.isFinite(job.progress) ? job.progress : 0,
+    last_error: job.last_error || null,
+    attempt_count: Number.isFinite(job.attempt_count) ? job.attempt_count : 0,
+    requested_at: job.requested_at || now,
+    updated_at: job.updated_at || now,
+    file_path: job.file_path || null,
+    auto_play: !!job.auto_play,
+    title: job.title || null,
+    artist: job.artist || null,
+  };
+}
+
+function serializeDownloadJob(job) {
+  const normalized = normalizeDownloadJob(job);
+  const track = normalized.track_id ? store.tracks[normalized.track_id] : null;
+  const filePath = normalized.file_path || track?.file_path || null;
+  return {
+    id: normalized.id,
+    trackId: normalized.track_id || null,
+    track_id: normalized.track_id || null,
+    spotifyId: normalized.spotify_id || track?.spotify_id || null,
+    spotify_id: normalized.spotify_id || track?.spotify_id || null,
+    intent: normalized.intent,
+    state: normalized.state,
+    status: normalized.state,
+    progress: normalized.progress,
+    attemptCount: normalized.attempt_count,
+    attempt_count: normalized.attempt_count,
+    lastError: normalized.last_error,
+    last_error: normalized.last_error,
+    requestedAt: normalized.requested_at,
+    requested_at: normalized.requested_at,
+    updatedAt: normalized.updated_at,
+    updated_at: normalized.updated_at,
+    filePath,
+    file_path: filePath,
+    autoPlay: normalized.auto_play,
+    auto_play: normalized.auto_play,
+    title: normalized.title || track?.title || null,
+    artist: normalized.artist || track?.artist || null,
+    album: track?.album || null,
+    albumArt: track?.album_art || null,
+    downloaded: !!track?.downloaded,
+  };
+}
+
+function sortDownloadJobsForDisplay(a, b) {
+  const stateRank = { running: 0, queued: 1, failed: 2, completed: 3, cancelled: 4 };
+  const rankDiff = (stateRank[a.state] ?? 99) - (stateRank[b.state] ?? 99);
+  if (rankDiff !== 0) return rankDiff;
+  return new Date(b.updated_at || b.requested_at || 0) - new Date(a.updated_at || a.requested_at || 0);
+}
+
+function migrateLegacyQueueToDownloadJobs() {
+  if (!Array.isArray(store.downloadJobs)) store.downloadJobs = [];
+  if (store.downloadJobs.length > 0 || !Array.isArray(store.queue) || store.queue.length === 0) return;
+
+  store.downloadJobs = store.queue.map(item => {
+    const track = store.tracks[item.track_id] || null;
+    return normalizeDownloadJob({
+      id: item.id,
+      track_id: item.track_id,
+      spotify_id: track?.spotify_id || null,
+      intent: 'download',
+      state: downloadStateFromLegacyStatus(item.status),
+      progress: item.progress || 0,
+      last_error: item.error || null,
+      attempt_count: item.status === 'done' ? 1 : 0,
+      requested_at: item.created_at || nowIso(),
+      updated_at: item.updated_at || item.created_at || nowIso(),
+      file_path: track?.file_path || null,
+      title: track?.title || null,
+      artist: track?.artist || null,
+    });
+  });
+  saveKey('downloadJobs');
 }
 
 // ─── TRACKS ──────────────────────────────────────────────────────────────────
@@ -269,58 +401,222 @@ function deleteFolder(id) {
 
 // ─── DOWNLOAD QUEUE ───────────────────────────────────────────────────────────
 
+function createDownloadJob(jobData) {
+  ensureReady();
+  const job = normalizeDownloadJob(jobData);
+  store.downloadJobs.push(job);
+  saveKey('downloadJobs');
+  return serializeDownloadJob(job);
+}
+
+function getDownloadJobById(jobId) {
+  ensureReady();
+  const job = store.downloadJobs.find(item => item.id === jobId);
+  return job ? serializeDownloadJob(job) : null;
+}
+
+function getRawDownloadJobById(jobId) {
+  ensureReady();
+  return store.downloadJobs.find(item => item.id === jobId) || null;
+}
+
+function updateDownloadJob(jobId, patch = {}) {
+  ensureReady();
+  const index = store.downloadJobs.findIndex(item => item.id === jobId);
+  if (index === -1) return null;
+  const nextJob = normalizeDownloadJob({
+    ...store.downloadJobs[index],
+    ...patch,
+    updated_at: patch.updated_at || nowIso(),
+  });
+  store.downloadJobs[index] = nextJob;
+  saveKey('downloadJobs');
+  return serializeDownloadJob(nextJob);
+}
+
+function findActiveDownloadJob(trackId, spotifyId = null) {
+  ensureReady();
+  const job = [...store.downloadJobs]
+    .filter(item =>
+      (item.state === 'queued' || item.state === 'running') &&
+      (
+        (trackId && item.track_id === trackId) ||
+        (spotifyId && item.spotify_id === spotifyId)
+      )
+    )
+    .sort((a, b) => new Date(b.updated_at || b.requested_at || 0) - new Date(a.updated_at || a.requested_at || 0))[0];
+  return job ? serializeDownloadJob(job) : null;
+}
+
+function getNextQueuedDownloadJob() {
+  ensureReady();
+  const job = [...store.downloadJobs]
+    .filter(item => item.state === 'queued')
+    .sort((a, b) => new Date(a.requested_at || a.updated_at || 0) - new Date(b.requested_at || b.updated_at || 0))[0];
+  return job ? serializeDownloadJob(job) : null;
+}
+
+function listDownloadJobs(states = null) {
+  ensureReady();
+  let jobs = [...store.downloadJobs];
+  if (Array.isArray(states) && states.length > 0) {
+    const wanted = new Set(states);
+    jobs = jobs.filter(item => wanted.has(item.state));
+  }
+  return jobs.sort(sortDownloadJobsForDisplay).map(serializeDownloadJob);
+}
+
+function getDownloadStats() {
+  ensureReady();
+  const total = store.downloadJobs.length;
+  const running = store.downloadJobs.filter(job => job.state === 'running').length;
+  const queued = store.downloadJobs.filter(job => job.state === 'queued').length;
+  const completed = store.downloadJobs.filter(job => job.state === 'completed').length;
+  const failed = store.downloadJobs.filter(job => job.state === 'failed').length;
+  const cancelled = store.downloadJobs.filter(job => job.state === 'cancelled').length;
+  return {
+    total,
+    queued,
+    running,
+    active: queued + running,
+    completed,
+    done: completed,
+    failed,
+    cancelled,
+  };
+}
+
+function getDownloadSnapshot() {
+  ensureReady();
+  return {
+    jobs: listDownloadJobs(),
+    stats: getDownloadStats(),
+  };
+}
+
+function clearDownloadHistory() {
+  ensureReady();
+  store.downloadJobs = store.downloadJobs.filter(job => job.state === 'queued' || job.state === 'running');
+  saveKey('downloadJobs');
+  return getDownloadSnapshot();
+}
+
+function clearAllDownloadJobs() {
+  ensureReady();
+  store.downloadJobs = [];
+  saveKey('downloadJobs');
+  return getDownloadSnapshot();
+}
+
+function requeueInterruptedDownloadJobs() {
+  ensureReady();
+  let changed = false;
+  store.downloadJobs = store.downloadJobs.map(job => {
+    if (job.state !== 'running') return job;
+    changed = true;
+    return {
+      ...job,
+      state: 'queued',
+      progress: 0,
+      updated_at: nowIso(),
+      last_error: job.last_error || 'Interrupted by app restart',
+    };
+  });
+  if (changed) saveKey('downloadJobs');
+  return changed;
+}
+
+function reconcileCompletedDownloadJobs() {
+  ensureReady();
+  const changedJobs = [];
+  let jobsChanged = false;
+  let tracksChanged = false;
+
+  store.downloadJobs = store.downloadJobs.map(job => {
+    if (job.state !== 'completed') return job;
+    const filePath = job.file_path || store.tracks[job.track_id]?.file_path || null;
+    if (filePath && fs.existsSync(filePath)) return job;
+
+    jobsChanged = true;
+    if (job.track_id && store.tracks[job.track_id]) {
+      store.tracks[job.track_id].downloaded = 0;
+      store.tracks[job.track_id].file_path = null;
+      tracksChanged = true;
+    }
+    const nextJob = {
+      ...job,
+      state: 'failed',
+      progress: 0,
+      file_path: null,
+      last_error: 'Downloaded file missing on disk',
+      updated_at: nowIso(),
+    };
+    changedJobs.push(serializeDownloadJob(nextJob));
+    return nextJob;
+  });
+
+  if (jobsChanged) saveKey('downloadJobs');
+  if (tracksChanged) saveKey('tracks');
+  return changedJobs;
+}
+
+function resetDownloadJobForRetry(jobId) {
+  ensureReady();
+  const raw = getRawDownloadJobById(jobId);
+  if (!raw) return null;
+  return updateDownloadJob(jobId, {
+    state: 'queued',
+    progress: 0,
+    last_error: null,
+    file_path: null,
+    attempt_count: 0,
+    updated_at: nowIso(),
+  });
+}
+
 function addToQueue(trackId) {
   ensureReady();
-  const item = {
-    id: crypto.randomUUID(),
+  const track = store.tracks[trackId] || null;
+  return createDownloadJob({
     track_id: trackId,
-    status: 'queued',
+    spotify_id: track?.spotify_id || null,
+    intent: 'download',
+    state: 'queued',
     progress: 0,
-    error: null,
-    created_at: new Date().toISOString(),
-  };
-  store.queue.push(item);
-  saveKey('queue');
-  return item;
+    title: track?.title || null,
+    artist: track?.artist || null,
+  });
 }
 
 function updateQueueItem(id, status, progress, error) {
-  ensureReady();
-  const item = store.queue.find(q => q.id === id);
-  if (item) {
-    item.status = status;
-    item.progress = progress;
-    item.error = error || null;
-    item.updated_at = new Date().toISOString();
-    saveKey('queue');
-  }
+  return updateDownloadJob(id, {
+    state: downloadStateFromLegacyStatus(status),
+    progress: Number.isFinite(progress) ? progress : 0,
+    last_error: error || null,
+  });
 }
 
 function getQueueStats() {
-  ensureReady();
-  const total = store.queue.length;
-  const done = store.queue.filter(q => q.status === 'done').length;
-  const failed = store.queue.filter(q => q.status === 'failed').length;
-  const queued = store.queue.filter(q => q.status === 'queued' || q.status === 'downloading').length;
-  return { total, done, failed, queued };
+  const stats = getDownloadStats();
+  return {
+    total: stats.total,
+    done: stats.completed,
+    failed: stats.failed,
+    queued: stats.queued + stats.running,
+  };
 }
 
 function getQueueItems() {
-  ensureReady();
-  return [...store.queue]
-    .reverse()
-    .slice(0, 200)
-    .map(q => ({
-      ...q,
-      ...(store.tracks[q.track_id] || {}),
-      track_id: q.track_id,
-    }));
+  return listDownloadJobs().map(job => ({
+    ...job,
+    status: legacyStatusFromDownloadState(job.state),
+    error: job.lastError,
+    created_at: job.requestedAt,
+  }));
 }
 
 function clearQueue() {
-  ensureReady();
-  store.queue = [];
-  saveKey('queue');
+  return clearAllDownloadJobs();
 }
 
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
@@ -741,10 +1037,14 @@ function reorderPlaylistTrack(playlistId, trackId, newPosition) {
 module.exports = {
   upsertTrack, getTrackBySpotifyId, getAllDownloadedTracks, getAllLikedTracks,
   updateTrackDownloaded, updateTrackLiked, incrementPlayCount, searchTracks,
-  deleteAllDownloads, deleteTrack,
+  deleteAllDownloads, deleteTrack, clearTrackDownloadState,
   upsertPlaylist, getAllPlaylists, getPlaylistTracks, addTrackToPlaylist,
   createLocalPlaylist, deletePlaylist, movePlaylistToFolder,
   createFolder, getAllFolders, deleteFolder,
+  createDownloadJob, getDownloadJobById, updateDownloadJob, findActiveDownloadJob,
+  getNextQueuedDownloadJob, listDownloadJobs, getDownloadStats, getDownloadSnapshot,
+  clearDownloadHistory, clearAllDownloadJobs, requeueInterruptedDownloadJobs,
+  reconcileCompletedDownloadJobs, resetDownloadJobForRetry,
   addToQueue, updateQueueItem, getQueueStats, getQueueItems, clearQueue,
   getSetting, setSetting,
   recordPlay, getStatsData, getAllSpotifyIds, updatePlaylistImage, renamePlaylist, renameFolder,

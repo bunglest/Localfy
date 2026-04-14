@@ -26,8 +26,8 @@ export default function TrackRow({ track, index, queue, showAlbum = true }) {
   const isCurrent = currentTrack?.id === track.id;
   const isLiked = liked.some(t => t.id === track.id || t.spotify_id === track.spotify_id);
   const dlState = activeDownloads[track.id];
-  const isDownloading = dlState?.status === 'downloading';
-  const isDone = track.downloaded || dlState?.status === 'done';
+  const isDownloading = dlState?.status === 'running';
+  const isDone = track.downloaded || dlState?.status === 'completed';
 
   const handlePlay = (e) => {
     if (e && (e.ctrlKey || e.metaKey)) {

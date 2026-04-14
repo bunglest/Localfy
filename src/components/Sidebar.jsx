@@ -33,7 +33,7 @@ export default function Sidebar() {
     }
   }
 
-  const queueCount = stats.queued || 0;
+  const queueCount = stats.active || ((stats.queued || 0) + (stats.running || 0));
 
   return (
     <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>

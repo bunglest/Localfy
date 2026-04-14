@@ -1,7 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell, dialog, protocol, Tray, Menu, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn, execSync } = require('child_process');
 const crypto = require('crypto');
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -10,7 +9,6 @@ const { autoUpdater } = require('electron-updater');
 let tray = null;
 let isQuitting = false;
 const apiCache = new Map();
-const activeProcs = new Map(); // trackId -> { proc, queueItemId, cancelled, suppressEvents }
 
 // ─── Single-instance lock + deep-link handler ─────────────────────────────────
 // Must happen BEFORE app.whenReady so the second-instance event fires early.
@@ -97,6 +95,7 @@ function createWindow() {
 app.whenReady().then(() => {
   registerProtocol();
   createWindow();
+  downloadManager.init();
 
   // ─── System Tray ────────────────────────────────────────────────────────────
   const trayIconPath = path.join(__dirname, '../public/icon.ico');
@@ -508,7 +507,13 @@ ipcMain.handle('spotify:getDiscoverTracks', async () => {
 // ─── DB Handlers ─────────────────────────────────────────────────────────────
 
 const db = require('./db');
+const { DownloadManager } = require('./downloadManager');
 const { getSmartRecommendations } = require('./recommendations');
+const downloadManager = new DownloadManager({
+  app,
+  db,
+  getMainWindow: () => mainWindow,
+});
 
 // ─── Smart Recommendations ──────────────────────────────────────────────────
 
@@ -703,123 +708,45 @@ ipcMain.handle('import:playlists', async () => {
 
 // ─── Downloads ────────────────────────────────────────────────────────────────
 
-let downloadQueue  = [];
-let isDownloading  = false;
-const AUDIO_EXTENSIONS = /\.(mp3|m4a|opus|ogg|webm)$/i;
-
 function getDownloadPath() {
-  const custom = getSetting('downloadPath', '');
-  if (custom && fs.existsSync(custom)) return custom;
-  const dir = path.join(app.getPath('music'), 'Localfy');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function findYtDlp() {
-  const candidates = [
-    'yt-dlp',
-    'yt-dlp.exe',
-    path.join(app.getPath('userData'), 'yt-dlp.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'yt-dlp', 'yt-dlp.exe'),
-  ];
-  for (const c of candidates) {
-    try { execSync(`"${c}" --version`, { stdio: 'ignore', timeout: 5000 }); return c; }
-    catch { continue; }
-  }
-  return null;
+  return downloadManager.getDownloadPath();
 }
 
 ipcMain.handle('download:checkYtDlp', () => {
-  const ytDlp = findYtDlp();
-  return { available: !!ytDlp, path: ytDlp };
+  return downloadManager.checkYtDlp();
 });
 
-function emitDownloadProgress(job, status, progress = 0, extra = {}) {
-  if (job?.queueItemId) {
-    db.updateQueueItem(job.queueItemId, status, progress, extra.error);
-  }
-  mainWindow?.webContents.send('download:progress', {
-    queueItemId: job?.queueItemId || null,
-    trackId: job?.track?.id || extra.trackId,
-    status,
-    progress,
-    title: job?.track?.title || extra.title,
-    artist: job?.track?.artist || extra.artist,
-    ...extra,
-  });
+function mapLegacyDownloadResult(result) {
+  return {
+    queued: !!result?.queued,
+    duplicate: !!result?.deduped,
+    deduped: !!result?.deduped,
+    alreadyDownloaded: !!result?.alreadyDownloaded,
+    queueItemId: result?.jobId || null,
+    jobId: result?.jobId || null,
+    existingStatus: result?.state === 'running' ? 'downloading' : (result?.state || null),
+    state: result?.state || null,
+    filePath: result?.filePath || null,
+    track: result?.track || null,
+  };
 }
 
-function resolveStoredTrack(track) {
-  if (!track) return null;
-  if (track.id) {
-    const byId = db.getTrackById(track.id);
-    if (byId) return byId;
-  }
-  if (track.spotify_id) {
-    const bySpotifyId = db.getTrackBySpotifyId(track.spotify_id);
-    if (bySpotifyId) return bySpotifyId;
-  }
-  return null;
-}
-
-function isDownloadedLocally(track) {
-  return !!(track?.downloaded && track?.file_path && fs.existsSync(track.file_path));
-}
-
-function findDownloadedFile(downloadDir, safeName, audioFormat, existingFiles) {
-  const exact = path.join(downloadDir, `${safeName}.${audioFormat}`);
-  if (fs.existsSync(exact)) return exact;
-
-  const files = fs.readdirSync(downloadDir).filter(f => AUDIO_EXTENSIONS.test(f));
-  const lowerSafeName = safeName.toLowerCase();
-  const preferred = files.filter(file => {
-    const lowerFile = file.toLowerCase();
-    return !existingFiles.has(file) || lowerFile.startsWith(lowerSafeName);
-  });
-
-  preferred.sort((a, b) => {
-    try {
-      return fs.statSync(path.join(downloadDir, b)).mtimeMs - fs.statSync(path.join(downloadDir, a)).mtimeMs;
-    } catch {
-      return 0;
-    }
-  });
-
-  const exactNameMatch = preferred.find(file => path.parse(file).name.toLowerCase() === lowerSafeName);
-  if (exactNameMatch) return path.join(downloadDir, exactNameMatch);
-  if (preferred[0]) return path.join(downloadDir, preferred[0]);
-
-  const legacyBase = safeName.substring(0, 40).toLowerCase();
-  const fallback = files.find(file => file.toLowerCase().startsWith(legacyBase));
-  return fallback ? path.join(downloadDir, fallback) : null;
-}
-
-function enqueueTrackDownload(track) {
-  const saved = resolveStoredTrack(track) || db.upsertTrack(track);
-  if (isDownloadedLocally(saved)) {
-    return { queued: false, alreadyDownloaded: true, track: saved, filePath: saved.file_path };
-  }
-
-  const existingQueueItem = db.getQueueItems().find(item =>
-    item.track_id === saved.id && (item.status === 'queued' || item.status === 'downloading')
+function cancelJobsByTrackId(trackId, options = {}) {
+  const jobs = downloadManager.getSnapshot().jobs.filter(job =>
+    job.trackId === trackId && (job.state === 'queued' || job.state === 'running')
   );
-  if (existingQueueItem) {
-    return {
-      queued: false,
-      duplicate: true,
-      queueItemId: existingQueueItem.id,
-      existingStatus: existingQueueItem.status,
-      track: saved,
-    };
+  let cancelled = 0;
+  for (const job of jobs) {
+    const result = downloadManager.cancel(job.id, options);
+    if (result?.cancelled) cancelled += 1;
   }
-
-  const queueItem = db.addToQueue(saved.id);
-  const job = { track: saved, queueItemId: queueItem.id };
-  downloadQueue.push(job);
-  emitDownloadProgress(job, 'queued', 0);
-  processDownloadQueue();
-  return { queued: true, queueItemId: queueItem.id, track: saved };
+  return { cancelled: cancelled > 0, count: cancelled };
 }
+
+ipcMain.handle('download:enqueue', async (_, track, options = {}) => downloadManager.enqueue(track, options));
+ipcMain.handle('download:getSnapshot', () => downloadManager.getSnapshot());
+ipcMain.handle('download:retry', (_, target) => downloadManager.retry(target));
+ipcMain.handle('download:clearHistory', () => downloadManager.clearHistory());
 
 async function downloadSingleTrack(job) {
   return new Promise((resolve) => {
@@ -936,72 +863,32 @@ async function downloadSingleTrack(job) {
   });
 }
 
-async function processDownloadQueue() {
-  if (isDownloading || downloadQueue.length === 0) return;
-  isDownloading = true;
-  while (downloadQueue.length > 0) {
-    await downloadSingleTrack(downloadQueue.shift());
-  }
-  isDownloading = false;
-}
-
 ipcMain.handle('download:track', async (_, track) => {
-  return enqueueTrackDownload(track);
+  const result = await downloadManager.enqueue(track, { intent: 'download', autoPlay: false });
+  return mapLegacyDownloadResult(result);
 });
 
 ipcMain.handle('download:all', async (_, tracks) => {
-  let queued = 0;
-  for (const track of tracks) {
-    const result = enqueueTrackDownload(track);
-    if (result.queued) queued += 1;
-  }
-  return { queued };
+  const result = await downloadManager.enqueueMany(tracks, { intent: 'download', autoPlay: false });
+  return {
+    queued: result.queued,
+    deduped: result.deduped,
+    alreadyDownloaded: result.alreadyDownloaded,
+    jobIds: result.jobIds,
+  };
 });
 
 ipcMain.handle('download:getStats',   ()  => db.getQueueStats());
 ipcMain.handle('download:getQueue',   ()  => db.getQueueItems());
-ipcMain.handle('download:clearQueue', ()  => {
-  downloadQueue = [];
-  for (const procMeta of activeProcs.values()) {
-    procMeta.cancelled = true;
-    procMeta.suppressEvents = true;
-    procMeta.proc.kill();
-  }
-  db.clearQueue();
+ipcMain.handle('download:clearQueue', () => downloadManager.clearAllJobs());
+
+ipcMain.handle('download:cancel', (_, jobIdOrTrackId) => {
+  const existingJob = db.getDownloadJobById(jobIdOrTrackId);
+  if (existingJob) return downloadManager.cancel(existingJob.id);
+  return cancelJobsByTrackId(jobIdOrTrackId);
 });
 
-ipcMain.handle('download:cancel', (_, trackId) => {
-  const procMeta = activeProcs.get(trackId);
-  if (procMeta) {
-    procMeta.cancelled = true;
-    procMeta.proc.kill();
-  }
-
-  let cancelled = !!procMeta;
-  downloadQueue = downloadQueue.filter(job => {
-    if (job.track.id !== trackId) return true;
-    emitDownloadProgress(job, 'failed', 0, { error: 'Cancelled' });
-    cancelled = true;
-    return false;
-  });
-
-  return { cancelled };
-});
-
-ipcMain.handle('download:retryFailed', async () => {
-  const failed = db.getQueueItems().filter(i => i.status === 'failed');
-  const seen = new Set();
-  let requeued = 0;
-  for (const item of failed) {
-    if (seen.has(item.track_id)) continue;
-    seen.add(item.track_id);
-    const track = db.getTrackById(item.track_id);
-    if (!track) continue;
-    const result = enqueueTrackDownload(track);
-    if (result.queued) requeued += 1;
-  }
-  return { requeued };
-});
+ipcMain.handle('download:retryFailed', () => downloadManager.retry('allFailed'));
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -1021,6 +908,7 @@ ipcMain.handle('settings:chooseDownloadPath', async () => {
 });
 
 ipcMain.handle('settings:deleteAllFiles', async () => {
+  downloadManager.clearAllJobs();
   const dlPath = getDownloadPath();
   try {
     const files = fs.readdirSync(dlPath)
@@ -1028,8 +916,10 @@ ipcMain.handle('settings:deleteAllFiles', async () => {
     for (const f of files) {
       try { fs.unlinkSync(path.join(dlPath, f)); } catch {}
     }
+    try { fs.rmSync(path.join(dlPath, '.localfy-temp'), { recursive: true, force: true }); } catch {}
     db.deleteAllDownloads();
-    db.clearQueue();
+    db.clearAllDownloadJobs();
+    downloadManager.emitChange();
     return { success: true, deleted: files.length };
   } catch (e) { return { success: false, error: e.message }; }
 });

@@ -1,5 +1,5 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { usePlayerStore, useLibraryStore, useToastStore, useUIStore, seekingFlag } from '../store';
+import { usePlayerStore, useLibraryStore, useToastStore, useUIStore, seekingFlag, isTrackPending } from '../store';
 import ArtistLinks from './ArtistLinks';
 import QueuePanel from './QueuePanel';
 import Equalizer from './Equalizer';
@@ -99,7 +99,7 @@ export default function Player() {
   const speedMenuRef = useRef(null);
 
   const isLiked   = currentTrack && liked.some(t => t.id === currentTrack.id || t.spotify_id === currentTrack.spotify_id);
-  const isPending = currentTrack?._pending;
+  const isPending = isTrackPending(currentTrack);
   const pct       = duration > 0 ? (progress / duration) * 100 : 0;
 
   // Progress bar: block timeupdate during drag so it can't override fill position.

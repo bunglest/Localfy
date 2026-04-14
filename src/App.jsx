@@ -18,7 +18,7 @@ import Discover from './pages/Discover';
 import CommandPalette from './components/CommandPalette';
 import KeyboardShortcuts from './components/KeyboardShortcuts';
 import ScrollToTop from './components/ScrollToTop';
-import { useAuthStore, usePlayerStore, useLibraryStore, useDownloadStore, useToastStore, useUIStore, seekingFlag } from './store';
+import { useAuthStore, usePlayerStore, useLibraryStore, useDownloadStore, useToastStore, useUIStore, seekingFlag, isTrackPending } from './store';
 
 function NavigationTracker() {
   const location = useLocation();
@@ -36,7 +36,7 @@ export default function App() {
   const showCommandPalette = useUIStore(s => s.showCommandPalette);
   const { setAudioEl, setProgress, setDuration, setPlaying, next, currentTrack } = usePlayerStore();
   const { refresh } = useLibraryStore();
-  const { handleProgress, loadStats, loadQueue } = useDownloadStore();
+  const { handleChanged, loadSnapshot } = useDownloadStore();
 
   // Init auth
   useEffect(() => { init(); }, []);
@@ -64,7 +64,7 @@ export default function App() {
       trackEndedNaturallyRef.current = true;
       const { repeat: r, next: n, currentTrack: ct } = usePlayerStore.getState();
       // Record this play in history
-      if (ct?.id && !ct._pending) {
+      if (ct?.id && !isTrackPending(ct)) {
         window.localfy.dbRecordPlay(ct.id, ct.duration_ms || 0).catch(() => {});
       }
       if (r === 'one') { audio.currentTime = 0; audio.play(); }
@@ -102,7 +102,7 @@ export default function App() {
       }
     }
     // Update ref for the new track
-    if (currentTrack?.id && !currentTrack._pending) {
+    if (currentTrack?.id && !isTrackPending(currentTrack)) {
       playStartRef.current = {
         trackId: currentTrack.id,
         startTime: Date.now(),
@@ -111,11 +111,11 @@ export default function App() {
     } else {
       playStartRef.current = { trackId: null, startTime: 0, duration: 0 };
     }
-  }, [currentTrack?.id, currentTrack?._pending]);
+  }, [currentTrack?.id, currentTrack?.pendingJobId]);
 
-  // Subscribe to download progress events
+  // Subscribe to download manager events
   useEffect(() => {
-    const unsub = window.localfy.onDownloadProgress(handleProgress);
+    const unsub = window.localfy.onDownloadChanged(handleChanged);
     return unsub;
   }, []);
 
@@ -123,18 +123,17 @@ export default function App() {
   useEffect(() => {
     if (loggedIn) {
       refresh();
-      loadStats();
-      loadQueue();
+      loadSnapshot();
     }
   }, [loggedIn]);
 
   // Discord Rich Presence — clear when track is stopped/cleared
   // (play events are fired directly from the store's playTrack/prev actions)
   useEffect(() => {
-    if (!currentTrack || currentTrack._pending) {
+    if (!currentTrack || isTrackPending(currentTrack)) {
       window.localfy.discordClearPresence().catch(() => {});
     }
-  }, [currentTrack?.id, currentTrack?._pending]);
+  }, [currentTrack?.id, currentTrack?.pendingJobId]);
 
   if (loading) {
     return (
