@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 
 const AUDIO_EXTENSIONS = /\.(mp3|m4a|opus|ogg|webm)$/i;
 const MAX_AUTO_RETRIES = 2;
@@ -12,6 +12,10 @@ function nowIso() {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function sanitizeFileStem(value) {
@@ -109,6 +113,38 @@ class DownloadManager {
     } catch {}
   }
 
+  normalizeExecutablePath(executablePath) {
+    if (!executablePath) return null;
+    return executablePath.replace('app.asar', 'app.asar.unpacked');
+  }
+
+  canExecuteBinary(command, args = ['--version']) {
+    if (!command) return false;
+    try {
+      execFileSync(command, args, { stdio: 'ignore', timeout: 5000, windowsHide: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  findCommandOnPath(command) {
+    try {
+      const lookup = process.platform === 'win32' ? 'where.exe' : 'which';
+      const output = execFileSync(lookup, [command], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+        windowsHide: true,
+      }).toString('utf8');
+      return output
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .find(Boolean) || null;
+    } catch {
+      return null;
+    }
+  }
+
   findYtDlp() {
     const candidates = [
       'yt-dlp',
@@ -117,17 +153,93 @@ class DownloadManager {
       path.join(process.env.LOCALAPPDATA || '', 'Programs', 'yt-dlp', 'yt-dlp.exe'),
     ];
     for (const candidate of candidates) {
-      try {
-        execSync(`"${candidate}" --version`, { stdio: 'ignore', timeout: 5000 });
-        return candidate;
-      } catch {}
+      if (this.canExecuteBinary(candidate)) return candidate;
     }
     return null;
   }
 
+  getJsRuntimePath() {
+    return process.execPath || null;
+  }
+
+  getJsRuntimeArg() {
+    const runtimePath = this.getJsRuntimePath();
+    return runtimePath ? `node:${runtimePath}` : null;
+  }
+
+  findFfmpegSuite() {
+    const candidates = [];
+
+    if (this.app.isPackaged && process.resourcesPath) {
+      const bundledDir = path.join(process.resourcesPath, 'bin', 'ffmpeg');
+      candidates.push({
+        source: 'bundled',
+        ffmpegPath: path.join(bundledDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+        ffprobePath: path.join(bundledDir, process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'),
+      });
+    }
+
+    try {
+      const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+      const ffprobeStatic = require('ffprobe-static');
+      candidates.push({
+        source: 'npm',
+        ffmpegPath: this.normalizeExecutablePath(ffmpegInstaller.path),
+        ffprobePath: this.normalizeExecutablePath(ffprobeStatic.path),
+      });
+    } catch {}
+
+    const systemFfmpeg = this.findCommandOnPath(process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    const systemFfprobe = this.findCommandOnPath(process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+    if (systemFfmpeg && systemFfprobe) {
+      candidates.push({
+        source: 'system',
+        ffmpegPath: systemFfmpeg,
+        ffprobePath: systemFfprobe,
+      });
+    }
+
+    for (const candidate of candidates) {
+      const ffmpegPath = candidate.ffmpegPath;
+      const ffprobePath = candidate.ffprobePath;
+      if (!this.canExecuteBinary(ffmpegPath, ['-version'])) continue;
+      if (!this.canExecuteBinary(ffprobePath, ['-version'])) continue;
+      const ffmpegDir = path.dirname(ffmpegPath);
+      const ffprobeDir = path.dirname(ffprobePath);
+      return {
+        available: true,
+        source: candidate.source,
+        ffmpegPath,
+        ffprobePath,
+        locationArg: ffmpegDir === ffprobeDir ? ffmpegDir : ffmpegPath,
+        pathEntries: unique([ffmpegDir, ffprobeDir]),
+      };
+    }
+
+    return {
+      available: false,
+      source: null,
+      ffmpegPath: null,
+      ffprobePath: null,
+      locationArg: null,
+      pathEntries: [],
+    };
+  }
+
   checkYtDlp() {
     const ytDlp = this.findYtDlp();
-    return { available: !!ytDlp, path: ytDlp };
+    const ffmpeg = this.findFfmpegSuite();
+    const jsRuntimePath = this.getJsRuntimePath();
+    return {
+      available: !!ytDlp,
+      path: ytDlp,
+      ffmpegAvailable: ffmpeg.available,
+      ffmpegPath: ffmpeg.ffmpegPath,
+      ffprobePath: ffmpeg.ffprobePath,
+      ffmpegSource: ffmpeg.source,
+      jsRuntimeAvailable: !!jsRuntimePath,
+      jsRuntimePath,
+    };
   }
 
   resolveStoredTrack(track) {
@@ -201,6 +313,60 @@ class DownloadManager {
   parseProgress(text) {
     const match = text.match(/(\d+(?:\.\d+)?)%/);
     return match ? Math.min(100, Math.max(0, parseFloat(match[1]))) : null;
+  }
+
+  summarizeYtDlpFailure(code, stderrOutput) {
+    const lines = String(stderrOutput || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    const errors = lines.filter(line => line.startsWith('ERROR:'));
+    if (errors.length > 0) {
+      return errors[errors.length - 1].replace(/^ERROR:\s*/, '');
+    }
+    const meaningful = lines.filter(line => !line.startsWith('WARNING:'));
+    const tail = (meaningful.length > 0 ? meaningful : lines).slice(-2).join(' ');
+    return tail
+      ? `yt-dlp exited with code ${code}: ${tail}`.substring(0, 500)
+      : `yt-dlp exited with code ${code}`;
+  }
+
+  getAudioDownloadPlan(requestedFormat, audioQuality, ffmpeg) {
+    const normalizedFormat = String(requestedFormat || 'mp3').toLowerCase();
+    const nativeSelectors = {
+      m4a: 'bestaudio[ext=m4a]/bestaudio[acodec*=mp4a]/bestaudio',
+      opus: 'bestaudio[acodec*=opus]/bestaudio[ext=webm]/bestaudio',
+    };
+
+    if (normalizedFormat === 'mp3' && ffmpeg.available) {
+      return {
+        args: ['-x', '--audio-format', 'mp3', '--audio-quality', String(audioQuality || '0')],
+        effectiveFormat: 'mp3',
+        note: null,
+      };
+    }
+
+    if (normalizedFormat === 'mp3') {
+      return {
+        args: ['-f', nativeSelectors.m4a],
+        effectiveFormat: 'm4a',
+        note: 'ffmpeg not found, falling back to the native audio stream instead of MP3 conversion',
+      };
+    }
+
+    if (normalizedFormat === 'opus') {
+      return {
+        args: ['-f', nativeSelectors.opus],
+        effectiveFormat: 'opus',
+        note: null,
+      };
+    }
+
+    return {
+      args: ['-f', nativeSelectors.m4a],
+      effectiveFormat: 'm4a',
+      note: null,
+    };
   }
 
   checkDiskSpace(downloadDir) {
@@ -497,19 +663,21 @@ class DownloadManager {
 
     const ytDlp = this.findYtDlp();
     if (!ytDlp) return { success: false, error: 'yt-dlp not found' };
+    const ffmpeg = this.findFfmpegSuite();
 
     this.cleanupTempDir(tempDir);
     fs.mkdirSync(tempDir, { recursive: true });
 
     const audioFormat = String(this.db.getSetting('audio.format', 'mp3'));
     const audioQuality = String(this.db.getSetting('audio.quality', '0'));
+    const plan = this.getAudioDownloadPlan(audioFormat, audioQuality, ffmpeg);
     const outTemplate = path.join(tempDir, 'source.%(ext)s');
     const query = [track.artist, track.title, 'audio'].filter(Boolean).join(' ');
     const args = [
       `ytsearch1:${query}`,
-      '-x',
-      '--audio-format', audioFormat,
-      '--audio-quality', audioQuality,
+      ...(this.getJsRuntimeArg() ? ['--js-runtimes', this.getJsRuntimeArg()] : []),
+      ...(ffmpeg.available && ffmpeg.locationArg ? ['--ffmpeg-location', ffmpeg.locationArg] : []),
+      ...plan.args,
       '-o', outTemplate,
       '--no-playlist',
       '--socket-timeout', '30',
@@ -517,9 +685,21 @@ class DownloadManager {
       '--no-part',
       '--newline',
     ];
+    if (plan.note) this.logJob(job.id, plan.note);
 
     return new Promise((resolve) => {
-      const proc = spawn(ytDlp, args, { windowsHide: true });
+      const env = { ...process.env };
+      if (ffmpeg.pathEntries.length > 0) {
+        env.PATH = [...ffmpeg.pathEntries, env.PATH].filter(Boolean).join(path.delimiter);
+      }
+      if (this.getJsRuntimeArg()) {
+        env.ELECTRON_RUN_AS_NODE = '1';
+      }
+
+      const proc = spawn(ytDlp, args, {
+        windowsHide: true,
+        env,
+      });
       const runtime = {
         jobId: job.id,
         trackId: job.trackId,
@@ -590,10 +770,9 @@ class DownloadManager {
         }
 
         this.cleanupTempDir(tempDir);
-        const trimmed = stderrOutput.trim().replace(/\s+/g, ' ').substring(0, 500);
         resolve({
           success: false,
-          error: trimmed ? `yt-dlp exited with code ${code}: ${trimmed}` : `yt-dlp exited with code ${code}`,
+          error: this.summarizeYtDlpFailure(code, stderrOutput),
         });
       });
     });

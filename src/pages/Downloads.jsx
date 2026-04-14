@@ -6,7 +6,7 @@ import { DownloadIcon, TrashIcon, RefreshIcon, CheckIcon, XIcon, AlertIcon } fro
 export default function Downloads() {
   const { stats, jobs, loadSnapshot, clearHistory, cancelJob, retryFailed } = useDownloadStore();
   const { add: toast } = useToastStore();
-  const [ytDlpOk, setYtDlpOk]   = useState(null);
+  const [toolStatus, setToolStatus] = useState(null);
   const [filter,   setFilter]    = useState('all'); // 'all' | 'completed' | 'queued' | 'failed' | 'cancelled'
 
   useEffect(() => {
@@ -16,7 +16,7 @@ export default function Downloads() {
 
   const checkYtDlp = async () => {
     const result = await window.localfy.downloadCheckYtDlp();
-    setYtDlpOk(result.available);
+    setToolStatus(result);
   };
 
   const handleClear = async () => {
@@ -73,7 +73,7 @@ export default function Downloads() {
       </div>
 
       {/* yt-dlp banners */}
-      {ytDlpOk === false && (
+      {toolStatus?.available === false && (
         <div style={{
           padding: '14px 18px', marginBottom: 24,
           background: 'rgba(255,71,87,0.08)', border: '1px solid rgba(255,71,87,0.25)',
@@ -97,14 +97,17 @@ export default function Downloads() {
         </div>
       )}
 
-      {ytDlpOk === true && (
+      {toolStatus?.available === true && (
         <div style={{
           padding: '10px 14px', marginBottom: 24,
           background: 'rgba(46,213,115,0.08)', border: '1px solid rgba(46,213,115,0.2)',
           borderRadius: 'var(--radius)', display: 'flex', alignItems: 'center', gap: 10,
           fontSize: 13, color: 'var(--green)',
         }}>
-          <CheckIcon size={15} /> yt-dlp is installed and ready
+          <CheckIcon size={15} />
+          {toolStatus.ffmpegAvailable
+            ? 'yt-dlp and ffmpeg are ready'
+            : 'yt-dlp is ready; native audio fallback is enabled'}
         </div>
       )}
 

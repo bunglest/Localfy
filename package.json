@@ -1,6 +1,6 @@
 {
   "name": "localfy",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Your music, downloaded. A Spotify-powered desktop player.",
   "main": "electron/main.js",
   "scripts": {
@@ -33,7 +33,16 @@
         "repo": "Localfy"
       }
     ],
-    "extraResources": [],
+    "extraResources": [
+      {
+        "from": "node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe",
+        "to": "bin/ffmpeg/ffmpeg.exe"
+      },
+      {
+        "from": "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe",
+        "to": "bin/ffmpeg/ffprobe.exe"
+      }
+    ],
     "win": {
       "target": [
         {
@@ -62,8 +71,10 @@
     }
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "discord-rpc": "^4.0.1",
     "electron-updater": "^6.8.3",
+    "ffprobe-static": "^3.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.22.3",

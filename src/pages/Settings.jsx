@@ -316,6 +316,18 @@ export default function Settings() {
         </SettingRow>
 
         <SettingRow
+          label="FFmpeg Status"
+          desc={ytDlpStatus?.ffmpegAvailable
+            ? `${ytDlpStatus.ffmpegSource === 'bundled' ? 'Bundled with Localfy' : 'Available at'}: ${ytDlpStatus.ffmpegPath || 'ffmpeg'}`
+            : 'Not found â€” Localfy will fall back to native audio when MP3 conversion is unavailable'}
+        >
+          {ytDlpStatus?.ffmpegAvailable
+            ? <span className="badge badge-green"><CheckIcon size={11} /> {ytDlpStatus.ffmpegSource === 'bundled' ? 'Bundled' : 'Ready'}</span>
+            : <span className="badge"><AlertIcon size={11} /> Fallback</span>
+          }
+        </SettingRow>
+
+        <SettingRow
           label="Downloaded Songs"
           desc={`${stats.done || 0} songs downloaded`}
         >
@@ -331,7 +343,7 @@ export default function Settings() {
         </SettingRow>
         {confirmDelete && (
           <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>
-            Click again to confirm. This will delete all downloaded MP3 files.{' '}
+            Click again to confirm. This will delete all downloaded audio files.{' '}
             <span style={{ color: 'var(--pink)', cursor: 'pointer' }} onClick={() => setConfirmDelete(false)}>Cancel</span>
           </div>
         )}
